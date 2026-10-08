@@ -28,12 +28,15 @@ ENV/
 logs/
 *.log
 
-# ---- Report / research artifacts ----
+# ---- Report / research artifacts & outputs ----
 quant_archive/
+output/
+data/historical/*.csv
 *.png
 *.csv
 *.pkl
 *.html
+!.gitkeep
 
 # ---- Build / dist ----
 build/
