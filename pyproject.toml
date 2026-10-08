@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "quidem-cta"
-version = "0.2.0"
+name = "quest-cta"
+version = "0.3.0"
 description = "个人量化交易 CTA 系统 - Binance 永续合约，多信号共识策略 + HMM状态检测 + Kelly仓位管理 + 蒙特卡洛分析"
 requires-python = ">=3.10"
 readme = "README.md"
-authors = [{ name = "Quidem" }]
+authors = [{ name = "Quest" }]
 dependencies = [
     "aiohttp",
     "ccxt==4.5.22",
@@ -37,7 +37,7 @@ dependencies = [
 dev = []
 
 [project.scripts]
-quidem-bot = "run:main"
+quest-bot = "run:main"
 
 [tool.setuptools]
 packages = ["core", "core.config", "core.engine", "core.analysis", "core.strategy", "core.risk", "core.ui", "core.utils", "core.web"]

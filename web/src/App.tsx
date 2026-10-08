@@ -25,7 +25,7 @@ function App() {
               Q
             </div>
             <h1 className="text-lg font-bold tracking-wider text-[var(--text-primary)]">
-              QUIDEM<span className="text-[var(--brand)]">_</span>CTA
+              QUEST<span className="text-[var(--brand)]">_</span>CTA
             </h1>
           </div>
 

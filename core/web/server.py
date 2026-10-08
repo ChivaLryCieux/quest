@@ -33,9 +33,9 @@ def create_app(state: WebState, control_callback=None) -> FastAPI:
     """创建 FastAPI 应用"""
 
     app = FastAPI(
-        title="Quidem Trading Bot",
+        title="Quest Trading Bot",
         description="量化交易 CTA 系统 Web 界面",
-        version="0.1.0",
+        version="0.3.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
     )
@@ -198,7 +198,7 @@ def create_app(state: WebState, control_callback=None) -> FastAPI:
                 <!DOCTYPE html>
                 <html>
                 <head>
-                    <title>Quidem Trading Bot</title>
+                    <title>Quest Trading Bot</title>
                     <style>
                         body {
                             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -233,7 +233,7 @@ def create_app(state: WebState, control_callback=None) -> FastAPI:
                 </head>
                 <body>
                     <div class="container">
-                        <h1>🤖 Quidem Trading Bot</h1>
+                        <h1>🤖 Quest Trading Bot</h1>
                         <p>Web GUI 前端尚未构建</p>
                         <p>请运行以下命令构建前端：</p>
                         <code>cd web && npm run build</code>

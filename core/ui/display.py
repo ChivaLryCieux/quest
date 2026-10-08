@@ -63,10 +63,10 @@ class DisplayManager:
 
         from core.config.mode import TradingMode
 
-        # 标题：◈ QUIDEM_CTA
+        # 标题：◈ QUEST_CTA
         title_text = Text()
         title_text.append("◈ ", style='red bold')
-        title_text.append("QUIDEM", style='white bold')
+        title_text.append("QUEST", style='white bold')
         title_text.append("_", style='red bold')
         title_text.append("CTA", style='white bold')
 

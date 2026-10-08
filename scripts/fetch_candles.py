@@ -38,7 +38,7 @@ def timeframe_to_ms(timeframe: str) -> int:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Quidem 简易 K 线数据下载与保存工具")
+    parser = argparse.ArgumentParser(description="Quest 简易 K 线数据下载与保存工具")
     parser.add_argument("-s", "--symbol", type=str, default=SYMBOL, help=f"标的代码。默认: {SYMBOL}")
     parser.add_argument("-t", "--timeframe", type=str, default=TIMEFRAME, choices=["5m", "15m", "1h", "1d"], help=f"K线周期。默认: {TIMEFRAME}")
     parser.add_argument("-n", "--limit", type=int, default=LIMIT, help=f"获取的 K 线数量。默认: {LIMIT}")

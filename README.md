@@ -1,6 +1,6 @@
-# Quidem - 个人量化交易CTA系统
+# Quest - 个人量化交易CTA系统
 
-Quidem 是一个面向个人使用的 Python 量化交易CTA系统。它不是发布到 PyPI 的包或通用库，而是把实盘/模拟盘执行、终端交互、Web GUI、Redis 状态通道、邮件报告、交易所接入、仓位风控、回测研究和运行日志组织在同一个仓库里，方便日常迭代和复盘。
+Quest 是一个面向个人使用的 Python 量化交易CTA系统。它不是发布到 PyPI 的包或通用库，而是把实盘/模拟盘执行、终端交互、Web GUI、Redis 状态通道、邮件报告、交易所接入、仓位风控、回测研究和运行日志组织在同一个仓库里，方便日常迭代和复盘。
 
 框架当前围绕 Binance 永续合约工作，但核心结构并不绑定某一个具体策略。策略可以替换，执行引擎、TUI、Web GUI、交易所接入、风控、报告和回测日志体系可以继续复用。
 
@@ -253,16 +253,17 @@ v0.2.0 在策略信号、仓位管理和分析能力上做了全面升级，目�
 ### 0. 项目结构
 
 ```text
-Quidem/
-├── run.py                         # 主入口，支持交互选择模式或命令行指定模式
-├── pyproject.toml                 # 项目元信息与依赖声明，支持 pip install -e .
+Quest/
+├── run.py                         # 主入口，默认 DASHBOARD 看盘模式，WebUI 控制切换
+├── pyproject.toml                 # 项目元信息与依赖声明 (v0.3.0)，支持 pip install -e .
 ├── requirements.txt               # Python 依赖（与 pyproject.toml 保持一致）
-├── .gitignore                     # 忽略 __pycache__/.env/logs/研究资产等
+├── .gitignore                     # 忽略 __pycache__/.env/logs/data/output 等
 ├── README.md
 │
-├── core/
+├── core/                          # 核心业务逻辑
 │   ├── config/
 │   │   ├── settings.py            # 默认配置、.env 加载、运行前校验
+│   │   ├── mode.py                # 交易模式状态机定义与切换校验
 │   │   └── exchange.py            # Binance REST + WebSocket 接入
 │   │
 │   ├── engine/
@@ -271,24 +272,24 @@ Quidem/
 │   │   └── alert_manager.py       # 运行中的告警辅助
 │   │
 │   ├── strategy/
-│   │   ├── brain.py               # 策略大脑，维护历史数据并输出分析上下文
-│   │   └── analyzers.py           # 信号生成和盘口分析
+│   │   ├── brain.py               # 策略大脑，维护多周期数据并输出分析上下文
+│   │   └── analyzers.py           # 多信号投票共识引擎和盘口分析
 │   │
 │   ├── analysis/
-│   │   ├── indicators.py          # 技术指标实现 (20+指标)
-│   │   ├── feature_engineering.py # 特征工程 (20维特征向量)
+│   │   ├── indicators.py          # 技术指标实现 (SuperTrend, Ichimoku 等)
+│   │   ├── feature_engineering.py # 特征工程
 │   │   ├── bocpd.py               # BOCPD变点检测
 │   │   ├── regime.py              # HMM市场状态检测 (4状态)
 │   │   ├── performance.py         # 绩效分析 (Sharpe/Sortino/Calmar)
 │   │   └── monte_carlo.py         # 蒙特卡洛策略模拟
 │   │
 │   ├── risk/
-│   │   ├── manager.py             # 风控管理
+│   │   ├── manager.py             # 风控管理 (硬止盈止损)
 │   │   ├── position.py            # 仓位辅助
 │   │   └── position_sizer.py      # Kelly Criterion动态仓位管理
 │   │
 │   ├── ui/
-│   │   ├── display.py             # TUI 输出
+│   │   ├── display.py             # Rich TUI 输出 (QUEST_CTA 启动面板与状态栏)
 │   │   └── input.py               # 键盘输入
 │   │
 │   ├── web/                       # Web GUI 后端
@@ -304,22 +305,29 @@ Quidem/
 │       ├── mailer.py              # 邮件发送封装
 │       └── reporting.py           # 报告生成、CSV 导出、日线快照
 │
-├── web/                           # Web GUI 前端 (Vite + React + TS)
+├── web/                           # Web GUI 前端 (Vite + React 18 + TS + Tailwind)
 │   ├── src/
-│   │   ├── components/            # React 组件
+│   │   ├── components/            # React 组件 (KLineChart, StrategyStatus 等)
 │   │   ├── hooks/                 # 自定义 Hooks
 │   │   ├── stores/                # Zustand 状态管理
 │   │   └── types/                 # TypeScript 类型定义
 │   ├── package.json
 │   └── vite.config.ts
 │
-├── scripts/
+├── scripts/                       # 离线辅助与运维脚本
+│   ├── fetch_candles.py           # 简易 K 线数据下载与保存工具
+│   ├── plot_candles.py            # 简易 K 线纯黑美化绘图工具
 │   ├── run_report.py              # Redis 交易报告消费者和定时邮件任务
 │   ├── liquidation_alert.py       # 爆仓量预警脚本
-│   └── pretrain.py                # 数据预热/研究辅助脚本
+│   └── pretrain.py                # 数据预热/模型辅助脚本
 │
-├── backtest/                      # 回测、诊断和模型实验（PNG/CSV/PKL 为研究产物）
-└── tests/                         # 本地单元测试
+├── data/                          # 本地数据管理目录
+│   ├── historical/                # 历史行情 CSV 数据
+│   └── models/                    # 模型权重与聚类中心数据
+│
+├── output/                        # 分析产物与图表输出目录 (如 kline_chart.png)
+├── logs/                          # 交易运行日志
+└── tests/                         # 本地单元测试 (test_framework_core, test_new_modules)
 ```
 
 > `__pycache__/`、日志、研究资产 PNG/CSV/PKL 都在 `.gitignore` 中被忽略，不会进入版本控制。
@@ -419,7 +427,7 @@ python run.py 2    # 实盘（Live）
 如果执行了 `pip install -e .`，也可以直接调用入口脚本：
 
 ```bash
-quidem-bot        # 等效于 python run.py
+quest-bot        # 等效于 python run.py
 ```
 
 ### 4. 构建 Web GUI 前端（可选）

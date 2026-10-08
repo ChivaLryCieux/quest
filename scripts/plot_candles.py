@@ -28,7 +28,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Quidem 简易 K 线绘图工具")
+    parser = argparse.ArgumentParser(description="Quest 简易 K 线绘图工具")
     parser.add_argument("-i", "--input", type=str, default=CSV_FILE, help=f"数据源 CSV 文件路径或文件名。默认: {CSV_FILE}")
     parser.add_argument("-o", "--output", type=str, default=OUTPUT_IMAGE, help=f"保存的图片文件路径。默认保存至 output/{OUTPUT_IMAGE}")
     parser.add_argument("-n", "--count", type=int, default=CANDLES_COUNT, help=f"绘制的 K 线数量。默认: {CANDLES_COUNT}")
