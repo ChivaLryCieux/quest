@@ -143,6 +143,11 @@ class Config:
     WEB_PORT = _env_int("WEB_PORT", 8000)
     WEB_AUTO_OPEN = _env_bool("WEB_AUTO_OPEN", True)
 
+    # 运行时状态持久化（余额 / 持仓 / Kelly 历史，断电重启可恢复）
+    STATE_DIR = os.getenv("STATE_DIR", "data/runtime")
+    STATE_FILE = os.getenv("STATE_FILE", "state.json")
+    STATE_SAVE_INTERVAL_SEC = _env_int("STATE_SAVE_INTERVAL_SEC", 60)
+
     @staticmethod
     def normalize_symbol(raw: str) -> str:
         """把 BTC / btc-usdt / SOL/USDT 等输入统一为 BTC/USDT。

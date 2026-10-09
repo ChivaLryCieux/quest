@@ -14,6 +14,8 @@ from core.config.settings import Config
 from core.config.mode import TradingMode, can_switch, parse_mode
 from core.engine.trader import TradeExecutor
 from core.engine.alert_manager import AlertManager
+from core.engine.state_store import StateStore
+from core.models.position import Position
 from core.risk.manager import RiskManager
 from core.strategy.brain import StrategyBrain
 from core.ui.display import DisplayManager
@@ -60,6 +62,12 @@ class QuantBot:
         self.trader = TradeExecutor(self.exchange, self.risk, self.ui, self.brain)
         self.alert_manager = AlertManager()
 
+        # 运行时状态持久化（余额 / 持仓 / Kelly 历史）
+        self.state_store = StateStore(Config.STATE_DIR, Config.STATE_FILE)
+        self._last_state_save = 0.0
+        self._last_saved_balance = None
+        self._restore_runtime_state()
+
         self.redis_client = self._init_redis()
 
         # Web GUI
@@ -86,6 +94,73 @@ class QuantBot:
         for issue in issues:
             logger.error("Config validation failed: %s", issue)
         raise SystemExit("配置校验失败，请修正 .env 或 core/config/settings.py 后重试")
+
+    def _restore_runtime_state(self):
+        """启动时恢复余额 / 持仓 / Kelly 交易历史。"""
+        data = self.state_store.load()
+        if not data:
+            return
+
+        try:
+            balance = float(data.get("balance", 0.0) or 0.0)
+            if balance > 0:
+                self.trader.update_balance(balance)
+
+            pos_data = data.get("position") or {}
+            if not Position.from_dict(pos_data).is_flat:
+                self.trader.position = Position.from_dict(pos_data)
+                logger.info(
+                    "Restored open position: size=%s entry=%s",
+                    self.trader.position.size,
+                    self.trader.position.entry_price,
+                )
+
+            # 恢复 Kelly / 回撤状态
+            sizer = self.trader.position_sizer
+            for rec in data.get("trade_history", []):
+                sizer.record_trade(float(rec.get("pnl", 0.0)), float(rec.get("duration_min", 0.0)))
+            peak = float(data.get("peak_equity", 0.0) or 0.0)
+            if peak > 0:
+                sizer.peak_equity = peak
+                sizer.current_equity = balance if balance > 0 else peak
+
+            saved_at = data.get("saved_at")
+            self._last_saved_balance = self.trader.balance
+            logger.info("Runtime state restored (balance=%.2f, saved_at=%s)", balance, saved_at)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Failed to restore runtime state, starting fresh: %s", exc)
+
+    def _persist_runtime_state(self, force: bool = False) -> bool:
+        """按间隔或强制写入状态（余额变化 = 交易完成时立即落盘）。"""
+        now = time.time()
+        balance = self.trader.balance
+        # 余额变化说明发生了平仓，立即持久化，避免崩溃丢交易
+        balance_changed = (
+            self._last_saved_balance is not None
+            and abs(balance - self._last_saved_balance) > 1e-9
+        )
+        if not force and not balance_changed:
+            if (now - self._last_state_save) < Config.STATE_SAVE_INTERVAL_SEC:
+                return False
+
+        sizer = self.trader.position_sizer
+        state = {
+            "symbol": Config.SYMBOL,
+            "mode": self.trading_mode.value,
+            "balance": balance,
+            "position": self.trader.position.to_dict(),
+            "peak_equity": sizer.peak_equity,
+            "current_equity": sizer.current_equity,
+            "trade_history": [
+                {"pnl": t.pnl, "duration_min": t.duration_min}
+                for t in sizer.trade_history
+            ],
+        }
+        ok = self.state_store.save(state)
+        if ok:
+            self._last_state_save = now
+            self._last_saved_balance = balance
+        return ok
 
     async def handle_control(self, request):
         """WebUI 控制命令路由（由 /api/control 调用）"""
@@ -295,6 +370,7 @@ class QuantBot:
             try:
                 self._check_user_input()
                 self._tick()
+                self._persist_runtime_state()  # 内部按 STATE_SAVE_INTERVAL_SEC 节流
                 time.sleep(self.LOOP_SLEEP_SECONDS)
             except KeyboardInterrupt:
                 self._exit_procedure()
@@ -590,5 +666,8 @@ class QuantBot:
         if not self.trader.position.is_flat:
             price = self.last_tick_price if self.last_tick_price > 0 else self.trader.position.entry_price
             self.trader.execute_exit("Manual Exit", price)
+
+        # 退出前强制落盘，保证余额与交易历史不丢
+        self._persist_runtime_state(force=True)
 
         sys.exit(0)
