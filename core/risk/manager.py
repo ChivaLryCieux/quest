@@ -35,11 +35,8 @@ class RiskManager:
         return False, ""
 
     def check_exit_conditions(self, position_data, current_price, current_time_ms, flips_count, atr=0.0, entry_balance=100.0, reversal_factor=0.0):
-        """检查平仓条件。"""
-        pos_size = position_data['size']
-        entry_price = position_data['entry_price']
-        entry_time = position_data['entry_time']
-        tp = position_data['tp']
+        """检查平仓条件。position_data 支持 Position 对象或旧 dict。"""
+        pos_size, entry_price, entry_time, tp = self._coerce_position(position_data)
 
         raw_pnl_pct = self._calculate_raw_pnl_pct(pos_size, entry_price, current_price)
         duration_min = (current_time_ms - entry_time) / 60000.0
@@ -62,6 +59,22 @@ class RiskManager:
             return True, reason
 
         return False, ""
+
+    @staticmethod
+    def _coerce_position(position_data):
+        if hasattr(position_data, "size"):
+            return (
+                position_data.size,
+                position_data.entry_price,
+                position_data.entry_time,
+                position_data.tp,
+            )
+        return (
+            position_data['size'],
+            position_data['entry_price'],
+            position_data['entry_time'],
+            position_data['tp'],
+        )
 
     @staticmethod
     def _calculate_raw_pnl_pct(pos_size, entry_price, current_price):

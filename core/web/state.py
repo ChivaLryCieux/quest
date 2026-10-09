@@ -155,10 +155,13 @@ class WebState:
 
     # ==================== 持仓信息更新 ====================
 
-    def update_position(self, position: Dict, unrealized_pnl: float = 0.0) -> None:
-        """更新持仓信息"""
-        with self._lock:
-            self._data['position'].update({
+    def update_position(self, position, unrealized_pnl: float = 0.0) -> None:
+        """更新持仓信息（支持 Position 对象或旧 dict）"""
+        if hasattr(position, "to_web_dict"):
+            snapshot = position.to_web_dict()
+            snapshot["unrealized_pnl"] = unrealized_pnl
+        else:
+            snapshot = {
                 'size': position.get('size', 0.0),
                 'entry_price': position.get('entry_price', 0.0),
                 'sl': position.get('sl', 0.0),
@@ -166,7 +169,9 @@ class WebState:
                 'entry_time': position.get('entry_time', 0),
                 'leverage': position.get('leverage', 10.0),
                 'unrealized_pnl': unrealized_pnl,
-            })
+            }
+        with self._lock:
+            self._data['position'].update(snapshot)
         self._notify_subscribers('position', self._data['position'])
 
     # ==================== 账户信息更新 ====================

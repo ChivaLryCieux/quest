@@ -61,7 +61,8 @@ backtest/*.pkl
 *.h5
 *.pt
 *.onnx
-models/
+/models/
+!core/models/
 
 # ---- OS ----
 .DS_Store

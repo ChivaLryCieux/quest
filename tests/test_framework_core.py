@@ -1,6 +1,7 @@
 import unittest
 
 from core.engine.trader import TradeExecutor
+from core.models.position import Position
 from core.risk.manager import RiskManager
 from core.strategy.analyzers import OrderBookAnalyzer
 
@@ -105,14 +106,18 @@ class TradeExecutorTest(unittest.TestCase):
         trader._attempt_entry(analysis, price=100.0, funding_rate=0.0, timestamp=123)
 
         self.assertEqual(len(exchange.orders), 1)
-        self.assertGreater(trader.position["size"], 0)
-        self.assertEqual(trader.position["leverage"], 5.0)
+        self.assertIsInstance(trader.position, Position)
+        self.assertGreater(trader.position.size, 0)
+        self.assertEqual(trader.position.leverage, 5.0)
+        # 兼容层：旧 dict 访问仍可用
+        self.assertGreater(trader.position_dict["size"], 0)
 
         entry_balance = trader.balance
         trader.execute_exit("test", price=102.0)
 
         self.assertEqual(len(exchange.orders), 2)
-        self.assertEqual(trader.position["size"], 0.0)
+        self.assertTrue(trader.position.is_flat)
+        self.assertEqual(trader.position.size, 0.0)
         self.assertGreater(trader.balance, entry_balance)
         self.assertEqual(len(ui.exits), 1)
 

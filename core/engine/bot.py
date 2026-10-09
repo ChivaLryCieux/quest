@@ -126,8 +126,8 @@ class QuantBot:
                 raise ValueError(msg)
 
             # 2. 无持仓校验
-            if self.trader.position['size'] != 0:
-                msg = f"当前有持仓，禁止切换模式 (size={self.trader.position['size']})"
+            if not self.trader.position.is_flat:
+                msg = f"当前有持仓，禁止切换模式 (size={self.trader.position.size})"
                 logger.warning(msg)
                 raise ValueError(msg)
 
@@ -428,7 +428,7 @@ class QuantBot:
 
             btc_chg = self._calculate_btc_change(btc_price)
 
-            if self.trader.position['size'] != 0:
+            if not self.trader.position.is_flat:
                 self.trader.tick(curr_price, fr, None, timestamp)
 
             if self.current_candle_timestamp == 0:
@@ -466,7 +466,7 @@ class QuantBot:
             analysis = self.brain.analyze(book)
             # 仅在非看盘模式下尝试开仓；持仓管理（上方）对遗留持仓仍生效
             if (self.trading_mode != TradingMode.DASHBOARD
-                    and self.trader.position['size'] == 0
+                    and self.trader.position.is_flat
                     and analysis):
                 self.trader.tick(curr_price, fr, analysis, timestamp)
 
@@ -494,7 +494,7 @@ class QuantBot:
 
     def _update_ui(self, price, analysis):
         pos = self.trader.position
-        unrealized = (price - pos['entry_price']) * pos['size'] if pos['size'] != 0 else 0
+        unrealized = pos.unrealized_pnl(price)
 
         # 更新 Web 状态 (无论是否有策略分析结果，价格和余额都需要实时更新)
         self._update_web_state(price, analysis, unrealized)
@@ -503,7 +503,7 @@ class QuantBot:
             return
 
         self.ui.update_status(
-            pos['size'],
+            pos.size,
             self.brain.state,
             self.brain.color,
             unrealized,
@@ -551,7 +551,7 @@ class QuantBot:
             data = {
                 "timestamp": int(time.time() * 1000),
                 "balance": self.trader.balance,
-                "position_size": self.trader.position['size'],
+                "position_size": self.trader.position.size,
                 "price": price,
                 "regime": self.brain.state,
                 "change_24h": round(change_24h, 2),
@@ -587,8 +587,8 @@ class QuantBot:
 
         self.exchange.close()
 
-        if self.trader.position['size'] != 0:
-            price = self.last_tick_price if self.last_tick_price > 0 else self.trader.position['entry_price']
+        if not self.trader.position.is_flat:
+            price = self.last_tick_price if self.last_tick_price > 0 else self.trader.position.entry_price
             self.trader.execute_exit("Manual Exit", price)
 
         sys.exit(0)
