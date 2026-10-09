@@ -77,6 +77,10 @@ class Config:
     TIMEFRAME_MACRO = os.getenv("TIMEFRAME_MACRO", "1h")     # 宏观趋势过滤周期（刻时模型）
     TIMEFRAME = TIMEFRAME_SIGNAL                             # 主周期，兼容旧代码
 
+    # 仓位数量限制（单标的 CTA 默认 1；PositionManager 依赖此字段）
+    MAX_POSITIONS = _env_int("MAX_POSITIONS", 1)
+    MAX_POSITION_SIZE = _env_float("MAX_POSITION_SIZE", 10000.0)
+
     # 资金管理
     PAPER_BALANCE = _env_float("PAPER_BALANCE", 100.0)
     MIN_LEVERAGE = _env_float("MIN_LEVERAGE", 5.0)
@@ -140,6 +144,40 @@ class Config:
     WEB_AUTO_OPEN = _env_bool("WEB_AUTO_OPEN", True)
 
     @staticmethod
+    def normalize_symbol(raw: str) -> str:
+        """把 BTC / btc-usdt / SOL/USDT 等输入统一为 BTC/USDT。
+
+        A 股（sh/sz 开头）与显式连字符标的保持原样，仅做大小写归一。
+        """
+        text = (raw or "").strip()
+        if not text:
+            return Config.SYMBOL
+        lowered = text.lower()
+        if lowered.startswith(("sh", "sz")) or "-" in text:
+            return text.upper() if "-" not in text else text
+        compact = text.upper().replace("/", "").replace("-", "").replace(" ", "")
+        if compact.endswith("USDT"):
+            base = compact[:-4]
+        else:
+            base = compact
+        return f"{base}/USDT" if base else Config.SYMBOL
+
+    @staticmethod
+    def set_symbol(raw: str) -> str:
+        """切换全局标的，并同步派生的 WS 订阅名。
+
+        返回归一化后的标的。解决原来 SYMBOL 变了但 SYMBOL_WS
+        仍是旧值的问题。
+        """
+        symbol = Config.normalize_symbol(raw)
+        Config.SYMBOL = symbol
+        if symbol.lower().startswith(("sh", "sz")) or "-" in symbol:
+            Config.SYMBOL_WS = symbol.lower()
+        else:
+            Config.SYMBOL_WS = symbol.replace("/", "").lower()
+        return symbol
+
+    @staticmethod
     def exchange_proxies():
         if not Config.PROXY_ENABLED or not Config.PROXY_URL:
             return {}
@@ -170,8 +208,18 @@ class Config:
             issues.append("MIN_TP_DISTANCE must be > 0")
         if Config.MAX_SL_DISTANCE <= 0:
             issues.append("MAX_SL_DISTANCE must be > 0")
+        if Config.MAX_SPREAD_PCT <= 0:
+            issues.append("MAX_SPREAD_PCT must be > 0")
+        if Config.MAX_POSITIONS < 1:
+            issues.append("MAX_POSITIONS must be >= 1")
+        if Config.MAX_POSITION_SIZE <= 0:
+            issues.append("MAX_POSITION_SIZE must be > 0")
+        if not Config.SYMBOL or "/" not in Config.SYMBOL:
+            issues.append("SYMBOL must look like BASE/QUOTE (e.g. SOL/USDT)")
         if is_live and (not Config.API_KEY or not Config.API_SECRET):
             issues.append("BINANCE_API_KEY and BINANCE_SECRET are required for live mode")
+        if is_live and getattr(Config, "BACKTEST_MODE", False):
+            issues.append("BACKTEST_MODE must be false in live mode (spread filter is bypassed otherwise)")
         if Config.ENABLE_MAIL_REPORT:
             if not Config.RESEND_API_KEY:
                 issues.append("RESEND_API_KEY is required when ENABLE_MAIL_REPORT=true")

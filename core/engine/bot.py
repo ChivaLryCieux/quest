@@ -188,9 +188,7 @@ class QuantBot:
 
     def switch_symbol(self, target_symbol: str):
         """切换交易/看盘标的 (支持 BTC, ETH, SOL 等)"""
-        symbol = target_symbol.upper()
-        if not symbol.endswith('/USDT') and '-' not in symbol and not symbol.lower().startswith(('sh', 'sz')):
-            symbol = f"{symbol}/USDT"
+        symbol = Config.set_symbol(target_symbol)
 
         if symbol == self.exchange.symbol:
             return f"Already on {symbol}"
