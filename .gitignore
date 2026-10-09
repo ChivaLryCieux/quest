@@ -37,6 +37,7 @@ data/historical/*.csv
 *.pkl
 *.html
 !.gitkeep
+!web/index.html
 
 # ---- Build / dist ----
 build/

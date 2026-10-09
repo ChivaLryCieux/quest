@@ -8,87 +8,70 @@ function App() {
   const system = useMarketStore((s) => s.system);
 
   const hasError = system.status === 'exchange_error';
-  const statusColor = hasError
-    ? 'text-[var(--red)]'
-    : system.status === 'running'
-      ? 'text-[var(--green)]'
-      : 'text-[var(--text-muted)]';
 
   return (
-    <div className="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-[var(--border)] bg-[var(--bg-card)]">
+    <div className="h-screen overflow-hidden px-4 py-4 text-[var(--text-primary)]">
+      {/* Floating island header */}
+      <header className="island mx-auto flex max-w-[1560px] items-center justify-between px-5 py-3">
         <div className="flex items-center gap-4">
-          {/* Logo */}
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-[var(--brand)] rounded flex items-center justify-center text-white font-bold text-sm">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--text-primary)] text-sm font-bold text-white">
               Q
             </div>
-            <h1 className="text-lg font-bold tracking-wider text-[var(--text-primary)]">
-              QUEST<span className="text-[var(--brand)]">_</span>CTA
+            <h1 className="text-[15px] font-semibold tracking-wide">
+              Quest
+              <span className="ml-2 rounded-full bg-[var(--bg-subtle)] px-2 py-0.5 align-middle text-[10px] font-mono text-[var(--text-secondary)]">
+                CTA
+              </span>
             </h1>
           </div>
 
-          {/* Divider */}
-          <div className="w-px h-6 bg-[var(--border-strong)]" />
+          <div className="h-5 w-px bg-[var(--border)]" />
 
-          {/* Symbol & Mode */}
           <div className="flex items-center gap-3">
-            <span className="text-sm text-[var(--text-secondary)] font-mono">
+            <span className="text-[13px] font-medium text-[var(--text-secondary)]">
               {useMarketStore((s) => s.account.symbol)}
             </span>
             <ModeSelector />
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
-          {/* WebSocket Status */}
-          <div className="flex items-center gap-2">
-            <div className={`status-dot ${connected ? 'status-connected' : 'status-disconnected'}`} />
-            <span className="text-xs font-mono text-[var(--text-secondary)]">
-              WS:{connected ? 'OK' : 'OFF'}
-            </span>
-          </div>
-
-          {/* Exchange Status */}
-          <div className="flex items-center gap-2">
-            <div className={`status-dot ${system.exchange_connected ? 'status-connected' : 'status-disconnected'}`} />
-            <span className="text-xs font-mono text-[var(--text-secondary)]">
-              EX:{system.exchange_connected ? 'OK' : 'OFF'}
-            </span>
-          </div>
-
-          {/* Uptime */}
+        <div className="flex items-center gap-5">
+          <StatusItem connected={connected} label={`WS ${connected ? 'OK' : 'OFF'}`} />
+          <StatusItem connected={system.exchange_connected} label={`EX ${system.exchange_connected ? 'OK' : 'OFF'}`} />
           <div className="text-xs font-mono text-[var(--text-muted)]">
             T+{formatUptime(system.uptime)}
           </div>
-
-          {/* System Status */}
-          <div className={`text-xs px-2 py-0.5 font-mono ${statusColor}`}>
-            [{system.status.toUpperCase()}]
-          </div>
+          <span className="rounded-full bg-[var(--bg-subtle)] px-2.5 py-1 text-[10px] font-mono tracking-widest text-[var(--text-secondary)]">
+            {system.status.toUpperCase()}
+          </span>
         </div>
       </header>
 
-      {/* Error Banner */}
       {hasError && (
-        <div className="bg-[var(--brand)]/5 border-b border-[var(--brand)]/20 px-6 py-3">
-          <div className="flex items-center gap-3">
-            <span className="text-[var(--red)] text-lg">◈</span>
-            <div>
-              <div className="text-xs font-mono text-[var(--red)] tracking-wider">EXCHANGE_CONNECTION_FAILED</div>
-              <div className="text-xs font-mono text-[var(--text-secondary)] mt-1">
-                {system.error_message || 'Unable to connect to exchange. Web GUI is still running.'}
-              </div>
+        <div className="island mx-auto mt-3 flex max-w-[1560px] items-center gap-3 px-5 py-3">
+          <span className="text-[var(--red)]">●</span>
+          <div>
+            <div className="text-xs font-medium text-[var(--red)]">Exchange connection failed</div>
+            <div className="mt-0.5 text-xs text-[var(--text-secondary)]">
+              {system.error_message || 'Unable to connect to exchange. Web GUI is still running.'}
             </div>
           </div>
         </div>
       )}
 
-      {/* Main Content */}
-      <main className={`p-4 overflow-hidden ${hasError ? 'h-[calc(100vh-125px)]' : 'h-[calc(100vh-57px)]'}`}>
+      <main className="mx-auto mt-3 h-[calc(100vh-112px)] max-w-[1560px] overflow-hidden">
         <Dashboard />
       </main>
+    </div>
+  );
+}
+
+function StatusItem({ connected, label }: { connected: boolean; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className={`status-dot ${connected ? 'status-connected' : 'status-disconnected'}`} />
+      <span className="text-xs font-mono text-[var(--text-secondary)]">{label}</span>
     </div>
   );
 }

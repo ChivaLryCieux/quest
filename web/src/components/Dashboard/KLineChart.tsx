@@ -53,35 +53,35 @@ export function KLineChart() {
       height: chartContainerRef.current.clientHeight || 420,
       layout: {
         background: { color: '#ffffff' },
-        textColor: '#64748b',
+        textColor: '#9aa3b2',
         fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       },
       grid: {
-        vertLines: { color: '#f1f5f9' },
-        horzLines: { color: '#f1f5f9' },
+        vertLines: { color: 'rgba(17,24,39,0.04)' },
+        horzLines: { color: 'rgba(17,24,39,0.04)' },
       },
       crosshair: {
         mode: 1, // Normal
         vertLine: {
-          color: '#cbd5e1',
+          color: '#cbd2dc',
           width: 1,
           style: 3, // Dotted
-          labelBackgroundColor: '#0f172a',
+          labelBackgroundColor: '#111827',
         },
         horzLine: {
-          color: '#cbd5e1',
+          color: '#cbd2dc',
           width: 1,
           style: 3,
-          labelBackgroundColor: '#0f172a',
+          labelBackgroundColor: '#111827',
         },
       },
       timeScale: {
-        borderColor: '#e2e8f0',
+        borderColor: 'rgba(17,24,39,0.08)',
         timeVisible: true,
         secondsVisible: false,
       },
       rightPriceScale: {
-        borderColor: '#e2e8f0',
+        borderColor: 'rgba(17,24,39,0.08)',
         autoScale: true,
       },
     });
@@ -267,31 +267,29 @@ export function KLineChart() {
   }, [price, timeframe]);
 
   return (
-    <div className="relative card p-4 w-full h-full bg-white flex flex-col overflow-hidden">
-      {/* 顶部行情及控制条 */}
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-4 select-none">
-        <div className="flex items-center gap-4 bg-slate-50 py-1 px-3 rounded-lg border border-slate-100">
-          <span className="text-sm font-bold tracking-wider text-slate-800">{symbol}</span>
-          <span className="text-xs font-mono px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded">{timeframe}</span>
-          <div className="h-3 w-px bg-slate-200" />
-          <span className="text-xs font-mono text-slate-500">
-            O: <span className="font-semibold text-slate-700">{overlayCandle?.open?.toFixed(2) || '—'}</span>
+    <div className="island flex h-full w-full flex-col overflow-hidden p-4">
+      {/* Top island toolbar */}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
+        <div className="flex items-center gap-3 rounded-full bg-[var(--bg-subtle)] px-3 py-1.5">
+          <span className="text-[13px] font-semibold text-[var(--text-primary)]">{symbol}</span>
+          <span className="font-mono text-[10px] text-[var(--text-muted)]">{timeframe}</span>
+          <div className="h-3 w-px bg-[var(--border-strong)]" />
+          <span className="font-mono text-[11px] text-[var(--text-secondary)]">
+            O {overlayCandle?.open?.toFixed(1) || '—'}
           </span>
-          <span className="text-xs font-mono text-slate-500">
-            H: <span className="font-semibold text-emerald-500">{overlayCandle?.high?.toFixed(2) || '—'}</span>
+          <span className="font-mono text-[11px] text-[var(--green)]">
+            H {overlayCandle?.high?.toFixed(1) || '—'}
           </span>
-          <span className="text-xs font-mono text-slate-500">
-            L: <span className="font-semibold text-rose-500">{overlayCandle?.low?.toFixed(2) || '—'}</span>
+          <span className="font-mono text-[11px] text-[var(--red)]">
+            L {overlayCandle?.low?.toFixed(1) || '—'}
           </span>
-          <span className="text-xs font-mono text-slate-500">
-            C: <span className="font-semibold text-slate-700">{overlayCandle?.close?.toFixed(2) || '—'}</span>
+          <span className="font-mono text-[11px] text-[var(--text-secondary)]">
+            C {overlayCandle?.close?.toFixed(1) || '—'}
           </span>
         </div>
 
-        {/* 右上角标的与周期选择器 */}
-        <div className="flex items-center gap-3">
-          {/* 标的选择器 (BTC, ETH, SOL) */}
-          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-full bg-[var(--bg-subtle)] p-1">
             {['BTC', 'ETH', 'SOL'].map((sym) => {
               const isActive = currentBaseSymbol === sym;
               const isPending = switchingSymbol === sym;
@@ -300,20 +298,19 @@ export function KLineChart() {
                   key={sym}
                   onClick={() => !isActive && !switchingSymbol && handleSymbolSwitch(sym)}
                   disabled={!!switchingSymbol}
-                  className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer ${
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition-all cursor-pointer ${
                     isActive
-                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200'
-                      : 'text-slate-500 hover:text-slate-800'
+                      ? 'bg-white text-[var(--text-primary)] shadow-sm'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
                   } ${isPending ? 'animate-pulse' : ''}`}
                 >
-                  {isPending ? `⏳ ${sym}` : sym}
+                  {sym}
                 </button>
               );
             })}
           </div>
 
-          {/* 周期选择器 (5m, 15m, 1h, 1d) */}
-          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+          <div className="flex rounded-full bg-[var(--bg-subtle)] p-1">
             {[
               { label: '5m', value: '5m' },
               { label: '15m', value: '15m' },
@@ -325,10 +322,10 @@ export function KLineChart() {
                 <button
                   key={tf.value}
                   onClick={() => setTimeframe(tf.value as any)}
-                  className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer ${
+                  className={`rounded-full px-3 py-1 font-mono text-xs transition-all cursor-pointer ${
                     isActive
-                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200'
-                      : 'text-slate-500 hover:text-slate-800'
+                      ? 'bg-white text-[var(--text-primary)] shadow-sm'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
                   }`}
                 >
                   {tf.label}
@@ -339,7 +336,7 @@ export function KLineChart() {
         </div>
       </div>
 
-      <div ref={chartContainerRef} className="w-full flex-1 min-h-0" />
+      <div ref={chartContainerRef} className="min-h-0 w-full flex-1" />
     </div>
   );
 }

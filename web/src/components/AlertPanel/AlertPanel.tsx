@@ -4,29 +4,18 @@ import type { AlertRecord } from '../../types';
 export function AlertPanel() {
   const alerts = useMarketStore((s) => s.alerts);
 
-  const typeIcon: Record<string, string> = {
-    BOCPD: '◈',
-    KDJ: '◆',
-    ADX: '◇',
-    MACD: '▣',
-  };
-
   return (
-    <div className="card p-4">
-      <div className="text-[10px] text-[var(--text-muted)] mb-4 font-mono tracking-widest">ALERT_LOG</div>
+    <div className="island h-full p-4">
+      <div className="island-title">Alerts</div>
 
       {alerts.length === 0 ? (
-        <div className="text-center py-12">
-          <div className="text-4xl text-[var(--border-strong)] mb-2">◇</div>
-          <div className="text-xs font-mono text-[var(--text-muted)]">NO_ALERTS</div>
-        </div>
+        <div className="py-8 text-center text-[13px] text-[var(--text-muted)]">No alerts</div>
       ) : (
-        <div className="space-y-2 max-h-[300px] overflow-y-auto">
+        <div className="mt-2 max-h-[300px] space-y-2 overflow-y-auto">
           {alerts.slice(0, 20).map((alert, i) => (
             <AlertRow
               key={i}
               alert={alert}
-              icon={typeIcon[alert.type] || '◈'}
             />
           ))}
         </div>
@@ -35,23 +24,18 @@ export function AlertPanel() {
   );
 }
 
-function AlertRow({ alert, icon }: { alert: AlertRecord; icon: string }) {
+function AlertRow({ alert }: { alert: AlertRecord }) {
   const time = new Date(alert.time).toLocaleTimeString('en-US', { hour12: false });
 
   return (
-    <div className="border border-[var(--brand)]/20 bg-[var(--brand)]/5 rounded p-3 hover:bg-[var(--brand)]/10 transition-colors">
-      <div className="flex items-start gap-3">
-        <span className="text-[var(--brand)] text-lg">{icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] text-[var(--text-muted)] font-mono">{time}</span>
-            <span className="text-[10px] text-[var(--brand)] font-mono px-1.5 py-0.5 border border-[var(--brand)]/20 rounded">
-              {alert.type}
-            </span>
-          </div>
-          <div className="text-xs text-[var(--text-secondary)] font-mono truncate">{alert.message}</div>
-        </div>
+    <div className="island-flat px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-[10px] text-[var(--text-muted)]">{time}</span>
+        <span className="rounded-full bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10px] text-[var(--text-secondary)]">
+          {alert.type}
+        </span>
       </div>
+      <div className="mt-1 truncate text-xs text-[var(--text-secondary)]">{alert.message}</div>
     </div>
   );
 }

@@ -3,18 +3,18 @@ import { useMarketStore } from '../../stores/marketStore';
 import type { TradingMode } from '../../types';
 
 // 模式显示配置
-const MODE_CONFIG: Record<TradingMode, { label: string; badge: string }> = {
+const MODE_CONFIG: Record<TradingMode, { label: string; dot: string }> = {
   dashboard: {
-    label: 'DASHBOARD',
-    badge: 'bg-[var(--bg-subtle)] text-[var(--text-secondary)] border border-[var(--border)]',
+    label: 'Dashboard',
+    dot: 'bg-[var(--text-muted)]',
   },
   paper: {
-    label: 'PAPER',
-    badge: 'bg-[var(--brand)]/10 text-[var(--brand)] border border-[var(--brand)]/30',
+    label: 'Paper',
+    dot: 'bg-[var(--green)]',
   },
   live: {
-    label: 'LIVE',
-    badge: 'bg-[var(--red)]/10 text-[var(--red)] border border-[var(--red)]/40',
+    label: 'Live',
+    dot: 'bg-[var(--red)]',
   },
 };
 
@@ -86,22 +86,23 @@ export function ModeSelector() {
               ? '模式切换中...'
               : '点击切换交易模式'
         }
-        className={`text-xs px-2 py-0.5 font-mono tracking-wider ${currentConfig.badge} ${
-          isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:opacity-80'
-        } transition-opacity flex items-center gap-1`}
+        className={`flex items-center gap-1.5 rounded-full bg-[var(--bg-subtle)] px-3 py-1 text-xs font-medium text-[var(--text-primary)] ${
+          isDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-[#eceff3]'
+        } transition-colors`}
       >
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${currentConfig.dot}`} />
         {modeSwitching ? (
-          <span className="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin" />
+          <span className="inline-block h-2 w-2 animate-spin rounded-full border border-current border-t-transparent" />
         ) : null}
         {currentConfig.label}
-        {!isDisabled ? <span className="text-[8px]">▾</span> : null}
+        {!isDisabled ? <span className="text-[9px] text-[var(--text-muted)]">▾</span> : null}
       </button>
 
       {/* 下拉菜单 */}
       {open && !isDisabled ? (
-        <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] card p-1 shadow-lg">
-          <div className="px-2 py-1 text-[10px] font-mono text-[var(--text-muted)] tracking-wider border-b border-[var(--border)] mb-1">
-            切换交易模式
+        <div className="island absolute right-0 top-full z-50 mt-2 min-w-[180px] p-1.5">
+          <div className="mb-1 border-b border-[var(--border)] px-2 py-1 text-[10px] text-[var(--text-muted)]">
+            Switch mode
           </div>
           {ALL_MODES.map((mode) => {
             const config = MODE_CONFIG[mode];
@@ -113,37 +114,31 @@ export function ModeSelector() {
                 type="button"
                 onClick={() => handleSelect(mode)}
                 disabled={isCurrent}
-                className={`w-full text-left px-2 py-1.5 text-xs font-mono flex items-center justify-between rounded transition-colors ${
+                className={`flex w-full items-center justify-between rounded-xl px-2 py-1.5 text-xs ${
                   isCurrent
-                    ? 'bg-[var(--bg-subtle)] text-[var(--text-muted)] cursor-default'
-                    : 'hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer'
-                }`}
+                    ? 'cursor-default bg-[var(--bg-subtle)] text-[var(--text-muted)]'
+                    : 'cursor-pointer text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]'
+                } transition-colors`}
               >
                 <span className="flex items-center gap-2">
-                  <span className={`inline-block w-1.5 h-1.5 rounded-full ${
-                    mode === 'live' ? 'bg-[var(--red)]' :
-                    mode === 'paper' ? 'bg-[var(--brand)]' :
-                    'bg-[var(--text-muted)]'
-                  }`} />
+                  <span className={`inline-block h-1.5 w-1.5 rounded-full ${config.dot}`} />
                   {config.label}
                 </span>
-                <span className="text-[9px] text-[var(--text-muted)]">
+                <span className="text-[10px] text-[var(--text-muted)]">
                   {isCurrent ? '●' : isUpgrade ? '↑' : '—'}
                 </span>
               </button>
             );
           })}
-          <div className="px-2 py-1 mt-1 border-t border-[var(--border)] text-[9px] font-mono text-[var(--text-muted)] leading-relaxed">
-            仅允许单向升级
-            <br />
-            有持仓时禁止切换
+          <div className="mt-1 border-t border-[var(--border)] px-2 py-1 text-[10px] leading-relaxed text-[var(--text-muted)]">
+            Upgrade only · locked with position
           </div>
         </div>
       ) : null}
 
       {/* 错误提示 */}
       {modeSwitchError ? (
-        <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] card p-2 text-[10px] font-mono text-[var(--red)] border-[var(--red)]/30">
+        <div className="island absolute right-0 top-full z-50 mt-2 min-w-[200px] p-2 text-[11px] text-[var(--red)]">
           {modeSwitchError}
         </div>
       ) : null}

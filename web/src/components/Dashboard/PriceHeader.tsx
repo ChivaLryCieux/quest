@@ -6,76 +6,83 @@ export function PriceHeader() {
   const position = useMarketStore((s) => s.position);
 
   return (
-    <div className="grid grid-cols-5 gap-3">
-      {/* Price */}
-      <div className="card-red-accent p-4">
-        <div className="text-[10px] text-[var(--text-muted)] mb-2 font-mono tracking-widest">PRICE</div>
-        <div className="text-2xl font-bold font-mono text-[var(--text-primary)]">
-          {market.price.toFixed(4)}
-        </div>
-        <div className={`text-xs font-mono mt-1 ${
-          market.change_24h >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'
-        }`}>
-          {market.change_24h >= 0 ? '▲' : '▼'} {Math.abs(market.change_24h).toFixed(2)}%
-        </div>
-      </div>
-
-      {/* Balance */}
-      <div className="card p-4">
-        <div className="text-[10px] text-[var(--text-muted)] mb-2 font-mono tracking-widest">BALANCE</div>
-        <div className="text-2xl font-bold font-mono text-[var(--brand)]">
-          ${account.balance.toFixed(2)}
-        </div>
-        <div className="text-xs font-mono text-[var(--text-muted)] mt-1">{account.symbol}</div>
-      </div>
-
-      {/* Unrealized PnL */}
-      <div className="card p-4">
-        <div className="text-[10px] text-[var(--text-muted)] mb-2 font-mono tracking-widest">UNREALIZED</div>
-        <div className={`text-2xl font-bold font-mono ${
-          position.unrealized_pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'
-        }`}>
-          {position.unrealized_pnl >= 0 ? '+' : ''}${position.unrealized_pnl.toFixed(2)}
-        </div>
-        <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
-          {position.size !== 0
-            ? `${position.size > 0 ? 'LONG' : 'SHORT'} ${Math.abs(position.size).toFixed(4)}`
-            : 'FLAT'}
-        </div>
-      </div>
-
-      {/* Funding Rate */}
-      <div className="card p-4">
-        <div className="text-[10px] text-[var(--text-muted)] mb-2 font-mono tracking-widest">FUNDING</div>
-        <div className="text-2xl font-bold font-mono text-[var(--text-secondary)]">
-          {(market.funding_rate * 100).toFixed(4)}%
-        </div>
-        <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
-          BTC: <span className="text-[var(--text-secondary)]">${market.btc_price.toFixed(0)}</span>
-        </div>
-      </div>
-
-      {/* Position Info */}
-      <div className="card p-4">
-        <div className="text-[10px] text-[var(--text-muted)] mb-2 font-mono tracking-widest">POSITION</div>
+    <div className="island grid shrink-0 grid-cols-5 divide-x divide-[var(--border)] px-1 py-3">
+      <HeaderCell
+        label="Price"
+        value={market.price.toFixed(2)}
+        sub={`${market.change_24h >= 0 ? '+' : ''}${market.change_24h.toFixed(2)}%`}
+        subTone={market.change_24h >= 0 ? 'up' : 'down'}
+      />
+      <HeaderCell label="Balance" value={`$${account.balance.toFixed(2)}`} sub={account.symbol} />
+      <HeaderCell
+        label="Unrealized"
+        value={`${position.unrealized_pnl >= 0 ? '+' : ''}$${position.unrealized_pnl.toFixed(2)}`}
+        valueTone={position.unrealized_pnl >= 0 ? 'up' : position.unrealized_pnl < 0 ? 'down' : undefined}
+        sub={position.size !== 0 ? `${position.size > 0 ? 'Long' : 'Short'} ${Math.abs(position.size).toFixed(4)}` : 'Flat'}
+      />
+      <HeaderCell
+        label="Funding"
+        value={`${(market.funding_rate * 100).toFixed(4)}%`}
+        sub={`BTC $${market.btc_price.toFixed(0)}`}
+      />
+      <div className="px-4">
+        <div className="island-title">Position</div>
         {position.size !== 0 ? (
-          <>
-            <div className="text-sm font-mono text-[var(--text-secondary)]">
-              <span className="text-[var(--text-muted)]">EP:</span> {position.entry_price.toFixed(4)}
-            </div>
-            <div className="flex gap-3 text-xs font-mono mt-2">
-              <span className="text-[var(--red)]">
-                <span className="text-[var(--text-muted)]">SL:</span> {position.sl.toFixed(4)}
-              </span>
-              <span className="text-[var(--green)]">
-                <span className="text-[var(--text-muted)]">TP:</span> {position.tp.toFixed(4)}
-              </span>
-            </div>
-          </>
+          <div className="mt-1.5 text-[13px] text-[var(--text-secondary)]">
+            <span className="text-[var(--text-muted)]">EP</span> {position.entry_price.toFixed(2)}
+            <span className="ml-3 text-[var(--text-muted)]">SL</span>{' '}
+            <span className="text-[var(--red)]">{position.sl.toFixed(2)}</span>
+            <span className="ml-3 text-[var(--text-muted)]">TP</span>{' '}
+            <span className="text-[var(--green)]">{position.tp.toFixed(2)}</span>
+          </div>
         ) : (
-          <div className="text-lg font-mono text-[var(--border-strong)]">—</div>
+          <div className="mt-1.5 text-[13px] text-[var(--text-muted)]">No position</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function HeaderCell({
+  label,
+  value,
+  sub,
+  subTone,
+  valueTone,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  subTone?: 'up' | 'down';
+  valueTone?: 'up' | 'down';
+}) {
+  return (
+    <div className="px-4">
+      <div className="island-title">{label}</div>
+      <div
+        className={`mt-1 text-[20px] font-semibold leading-none tracking-tight ${
+          valueTone === 'up'
+            ? 'text-[var(--green)]'
+            : valueTone === 'down'
+              ? 'text-[var(--red)]'
+              : 'text-[var(--text-primary)]'
+        }`}
+      >
+        {value}
+      </div>
+      {sub ? (
+        <div
+          className={`mt-1.5 text-xs ${
+            subTone === 'up'
+              ? 'text-[var(--green)]'
+              : subTone === 'down'
+                ? 'text-[var(--red)]'
+                : 'text-[var(--text-muted)]'
+          }`}
+        >
+          {sub}
+        </div>
+      ) : null}
     </div>
   );
 }
