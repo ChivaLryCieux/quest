@@ -21,7 +21,7 @@ class BaseStrategy(ABC):
         btc_change_pct: float = 0.0,
         obi_value: float = 0.0,
     ) -> None:
-        """接收 K 线数据更新内部状态与历史缓存。"""
+        """接收 K 线数据，更新内部状态与历史缓存。"""
         pass
 
     @abstractmethod
