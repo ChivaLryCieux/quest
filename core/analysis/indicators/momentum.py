@@ -1,3 +1,4 @@
+from collections import deque
 import numpy as np
 import pandas as pd
 from .utils import MathUtils
@@ -6,14 +7,12 @@ from .utils import MathUtils
 class MomentumCalculator:
     def __init__(self, periods=[1, 5, 15, 30, 50, 96]):
         self.periods = periods
-        self.history = []
         self.max_len = max(periods) + 5
+        self.history = deque(maxlen=self.max_len)
 
     def update(self, price):
         """Update with new price and return momentum array."""
         self.history.append(price)
-        if len(self.history) > self.max_len:
-            self.history.pop(0)
         return np.array(
             [np.log(self.history[-1] / self.history[-(p + 1)]) if len(self.history) > p else 0.0
              for p in self.periods])

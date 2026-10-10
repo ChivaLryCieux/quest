@@ -4,6 +4,7 @@ Web 共享状态管理
 线程安全的共享状态，用于在主循环和 Web 服务器之间传递数据。
 """
 
+from collections import deque
 import json
 import logging
 import threading
@@ -74,6 +75,8 @@ class WebState:
         # 交易记录限制
         self._max_trades = 100
         self._max_alerts = 50
+        self._trades_buffer: deque = deque(maxlen=self._max_trades)
+        self._alerts_buffer: deque = deque(maxlen=self._max_alerts)
 
     def subscribe(self, callback: Callable) -> None:
         """添加 WebSocket 订阅者"""
@@ -192,9 +195,8 @@ class WebState:
     def add_trade(self, trade: Dict) -> None:
         """添加交易记录"""
         with self._lock:
-            self._data['trades'].insert(0, trade)
-            if len(self._data['trades']) > self._max_trades:
-                self._data['trades'] = self._data['trades'][:self._max_trades]
+            self._trades_buffer.appendleft(trade)
+            self._data['trades'] = list(self._trades_buffer)
         self._notify_subscribers('trade', trade)
 
     def log_entry(self, side: str, price: float, leverage: float, sl: float, tp: float, regime: str) -> None:
@@ -235,9 +237,8 @@ class WebState:
             'time': int(time.time() * 1000),
         }
         with self._lock:
-            self._data['alerts'].insert(0, alert)
-            if len(self._data['alerts']) > self._max_alerts:
-                self._data['alerts'] = self._data['alerts'][:self._max_alerts]
+            self._alerts_buffer.appendleft(alert)
+            self._data['alerts'] = list(self._alerts_buffer)
         self._notify_subscribers('alert', alert)
 
     # ==================== 系统状态 ====================

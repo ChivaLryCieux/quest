@@ -16,6 +16,7 @@
   回撤缩仓: alloc = base_alloc * max(0.2, 1 - dd_pct/dd_limit)
 """
 
+from collections import deque
 import logging
 import numpy as np
 
@@ -49,8 +50,8 @@ class PositionSizer:
     MAX_LEVERAGE = 15.0
 
     def __init__(self):
-        self.trade_history: list[TradeRecord] = []
         self.max_history = 200     # 最多保留最近200笔交易
+        self.trade_history: deque[TradeRecord] = deque(maxlen=self.max_history)
         self.peak_equity = 0.0
         self.current_equity = 0.0
 
@@ -63,8 +64,6 @@ class PositionSizer:
     def record_trade(self, pnl: float, duration_min: float = 0.0):
         """记录一笔交易结果"""
         self.trade_history.append(TradeRecord(pnl, duration_min))
-        if len(self.trade_history) > self.max_history:
-            self.trade_history = self.trade_history[-self.max_history:]
 
     def calculate_kelly(self) -> float:
         """计算Kelly最优仓位比例

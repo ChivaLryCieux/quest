@@ -8,6 +8,7 @@
 4. 协调信号生成
 """
 
+from collections import deque
 import pandas as pd
 import logging
 from colorama import Fore
@@ -34,16 +35,16 @@ class StrategyBrain(BaseStrategy):
         self.state = "⏳ 等待"
         self.color = Fore.WHITE
         
-        # 5m K线历史数据 (用于信号生成)
-        self.history_5m = pd.DataFrame(columns=self.HISTORY_COLUMNS)
-        
-        # 15m K线历史数据 (用于趋势过滤)
-        self.history_15m = pd.DataFrame(columns=self.HISTORY_COLUMNS)
+        # 定长双端队列缓冲，消除 pd.concat 的内存拷贝与重分配
+        self._buffer_5m = deque(maxlen=500)
+        self._buffer_15m = deque(maxlen=200)
+        self._buffer_1h = deque(maxlen=120)
+        self._buffer_1d = deque(maxlen=100)
 
-        # 1h K线历史数据 (刻时模型: 宏观趋势确认)
+        # 5m K线历史数据 (用于信号生成与外部读取)
+        self.history_5m = pd.DataFrame(columns=self.HISTORY_COLUMNS)
+        self.history_15m = pd.DataFrame(columns=self.HISTORY_COLUMNS)
         self.history_1h = pd.DataFrame(columns=self.HISTORY_COLUMNS)
-        
-        # 1d K线历史数据
         self.history_1d = pd.DataFrame(columns=self.HISTORY_COLUMNS)
         
         # 缓存的分析数据
@@ -69,11 +70,10 @@ class StrategyBrain(BaseStrategy):
             obi_value: 订单簿失衡值 (保留兼容)
         """
         normalized = self._normalize_candle(item)
-        new_row = pd.DataFrame([normalized], columns=self.HISTORY_COLUMNS)
         
         if timeframe in ['5m', '1m']:
-            # 5m 数据用于信号生成
-            self.history_5m = self._append_history(self.history_5m, new_row, max_length=500)
+            self._buffer_5m.append(normalized)
+            self.history_5m = pd.DataFrame(list(self._buffer_5m), columns=self.HISTORY_COLUMNS)
             
             # 计算5m特征
             if len(self.history_5m) >= 100:
@@ -83,8 +83,8 @@ class StrategyBrain(BaseStrategy):
                 self.cached_analysis_data = context
         
         elif timeframe == '15m':
-            # 15m 数据用于趋势过滤
-            self.history_15m = self._append_history(self.history_15m, new_row, max_length=200)
+            self._buffer_15m.append(normalized)
+            self.history_15m = pd.DataFrame(list(self._buffer_15m), columns=self.HISTORY_COLUMNS)
             
             # 计算15m SuperTrend
             if len(self.history_15m) >= 30:
@@ -92,15 +92,16 @@ class StrategyBrain(BaseStrategy):
                 self.signal_engine.update_15m_supertrend(st_result['direction'])
 
         elif timeframe == '1h':
-            # 1h 数据用于宏观方向确认（刻时模型）
-            self.history_1h = self._append_history(self.history_1h, new_row, max_length=120)
+            self._buffer_1h.append(normalized)
+            self.history_1h = pd.DataFrame(list(self._buffer_1h), columns=self.HISTORY_COLUMNS)
 
             if len(self.history_1h) >= 30:
                 st_result = self.supertrend_1h.calculate(self.history_1h)
                 self.signal_engine.update_1h_supertrend(st_result['direction'])
 
         elif timeframe == '1d':
-            self.history_1d = self._append_history(self.history_1d, new_row, max_length=100)
+            self._buffer_1d.append(normalized)
+            self.history_1d = pd.DataFrame(list(self._buffer_1d), columns=self.HISTORY_COLUMNS)
 
     def _normalize_candle(self, item):
         """将K线数据标准化为7字段。"""
