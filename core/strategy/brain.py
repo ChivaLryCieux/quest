@@ -12,6 +12,7 @@ import pandas as pd
 import logging
 from colorama import Fore
 
+from core.strategy.base import BaseStrategy
 from core.strategy.analyzers import SignalEngine
 from core.analysis.feature_engineering import FeatureEngineer
 from core.analysis.indicators import SuperTrend
@@ -23,10 +24,11 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 策略大脑
 # ==========================================
-class StrategyBrain:
+class StrategyBrain(BaseStrategy):
     HISTORY_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'taker_buy']
 
-    def __init__(self):
+    def __init__(self, name: str = "ConsensusCTAStrategy"):
+        super().__init__(name=name)
         self.feature_engineer = FeatureEngineer()
         self.signal_engine = SignalEngine()
         self.state = "⏳ 等待"
