@@ -49,14 +49,15 @@ Quest 是一个面向个人使用的 Python 量化交易CTA系统。它不是发
 
 ### 1. 量化策略执行核心
 
-交易执行核心位于 `core/engine/`，负责把行情数据、策略信号、风控判断和订单执行串起来。它使用普通 Python 类组织职责边界，通过 `ccxt`、`websocket-client`、`pandas`、`numpy` 等库把实时行情、特征计算和交易执行连接起来。
+交易执行核心位于 `core/engine/`，负责协调行情驱动、策略信号计算、风控审查与订单路由。框架遵循面向对象与分层设计原则，解耦数据流与执行流：
 
-- `core/engine/bot.py`：主循环入口，负责连接交易所、预热历史数据、驱动实时 tick、刷新界面、发送心跳。
-- `core/engine/trader.py`：交易执行器，负责开仓、平仓、持仓状态、纸盘成交、手续费估算、交易记录推送。
-- `core/strategy/`：策略决策层，负责把 `DataFrame`、盘口和指标上下文转换为交易信号。
-- `core/analysis/`：特征和指标层，基于 `pandas.Series`、`pandas.DataFrame` 和 `numpy` 数组做数据计算。
-
-这部分的设计目标是让策略只关心“是否交易”，而执行层统一处理“如何交易、何时退出、如何记录”。
+- `core/engine/bot.py`：主循环协调器（`QuantBot`），维护毫秒级 Tick 事件循环、驱动多周期 K 线归集与全局状态同步。
+- `core/engine/switcher.py`：标的与模式热切换控制器（`ModeSwitcher` / `SymbolSwitcher` / `WarmupCoordinator`），基于**两阶段并发锁协议**，在锁外异步预热并在锁内原子置换，彻底杜绝数十秒网络 I/O 阻塞 50ms 主交易循环。
+- `core/engine/trader.py`：订单执行器，管理开仓、平仓、保本止损、追踪止盈与滑点仿真。
+- `core/engine/state_store.py`：基于系统级 `os.replace` 的原子落盘存储，保障运行态崩溃一致性与自愈恢复。
+- `core/models/position.py`：基于 `@dataclass` 的强类型 `Position` 领域实体，统领持仓方向、名义价值与风控收益计算。
+- `core/strategy/`：策略抽象层，基于 `BaseStrategy` 规范生命周期契约，支持多策略插拔与盘口微观结构（`OrderBookAnalyzer`）分析。
+- `core/analysis/`：指标与特征层，全面引入 `collections.deque(maxlen=N)` 双端定长缓冲，消除 K 线流追加时的 $O(N)$ 连续内存拷贝。
 
 ### 2. TUI 终端界面
 
@@ -118,41 +119,30 @@ Bot 主循环 ──[bot_lock / api_lock]──> WebState ──> FastAPI WebSoc
 
 启动后会自动打开浏览器访问 `http://127.0.0.1:8000`，同时 TUI 终端界面继续工作。两者共享同一份数据，互不干扰。
 
-### 3. 基于 Redis 的邮件系统
+### 3. 基于 Redis 的异步削峰解耦与分布式探活
 
-邮件系统由交易进程、Redis 队列和报告脚本组成，避免交易主循环直接承担邮件发送压力。这里使用 `redis` 作为轻量消息通道，`resend` 作为邮件发送 SDK，`schedule` 负责定时任务，`matplotlib` 负责生成权益曲线和交易内曲线图。
+系统采用 Redis 作为轻量级高性能异步消息总线，实现高可用解耦：
 
-- 交易主进程把心跳写入 Redis：`bot_status_heartbeat`。
-- 平仓后把交易记录写入 Redis：`trade_journal_pending`。
-- `scripts/run_report.py` 定时消费 Redis 中的交易记录，生成 HTML 报告和 CSV 附件。
-- `core/utils/reporting.py` 负责报告 HTML、权益曲线、交易明细和归档文件，内部使用 `pandas` 汇总交易、用 `matplotlib.figure.Figure` 绘图。
-- `core/utils/mailer.py` 封装 Resend 邮件发送，可被报告或预警脚本复用。
+- **跨进程生产者-消费者削峰解耦**：核心交易主循环在平仓后，仅以纳秒级开销将交易流水推入 Redis List（`trade_journal_pending`）；独立的报告进程（`scripts/run_report.py`）异步消费并执行耗时的 Matplotlib 权益绘图与 Resend 邮件投递，**实现交易主循环与报表渲染的彻底物理隔离**，避免网络与绘图抖动阻塞交易执行。
+- **基于 TTL 租约的死信探活（Lease-based Liveness Probe）**：交易主进程定期向 Redis 写入心跳（`bot_status_heartbeat`）并配置 `ex=10` 秒租约过期；外部监控进程若侦测到 Key 缺失即可零侵入判定核心进程假死，触发容灾告警。
 
-这种结构的好处是交易进程和通知进程解耦：Redis 或邮件服务异常时，不会直接阻塞核心交易循环。
+### 4. 独立网关适配层 (Gateway Layer)
 
-### 4. 交易所接入层
+独立网关层位于 `core/gateway/`，基于**门面模式（Facade）**与**适配器模式（Adapter）**统一封装交易所连接：
 
-交易所接入层位于 `core/config/exchange.py`，封装 Binance Futures 的 REST API 和 WebSocket 数据流。REST 侧使用 `ccxt` 统一市场、余额、精度和下单接口；WebSocket 侧使用 `websocket-client` 订阅 K 线、深度和资金费率。
-
-- REST API：通过 `ccxt.binance` 调用 `load_markets()`、`fetch_balance()`、`fetch_ohlcv()`、`create_market_order()`。
-- WebSocket：通过 `websocket.WebSocketApp` 接收实时 K 线、盘口深度、mark price 和 funding rate。
-- 代理支持：通过 `HTTP_PROXY`、`HTTPS_PROXY` 和 WebSocket proxy options 适配本地网络环境。
-- 线程模型：`MarketDataStreamer` 继承 `threading.Thread`，用 `threading.Lock` 保护实时行情缓存。
-- 模拟盘隔离：非实盘模式不会调用真实下单接口，而是记录 paper order，便于本地验证执行链路。
-
-这层的目标是把外部交易所的不稳定性隔离起来，给策略和交易执行器提供稳定的数据和订单接口。
+- **数据流与执行解耦**：
+  - `binance_stream.py`（`MarketDataStreamer`）：基于 `websocket-client` 实现 Binance 永续合约实时组合流订阅，包含断线毫秒级自动重连与心跳保活。
+  - `domestic_feed.py`（`DomesticDataStreamer`）：国内 A 股免代理直连行情源，支持盘口五档与秒级合成 K 线。
+  - `service.py`（`ExchangeService`）：统一网关门面，封装 CCXT 接口并向下屏蔽纸盘仿真记账与实盘委托差异。
+- **分层异常体系与异常链**：全面采用基于 `QuestError` 的分层异常（`OrderError` / `DataError`），并遵循 **PEP 3134 异常链（`raise ... from e`）** 保留交易所底层真实调用栈，杜绝伪成交假阳性。
 
 ### 5. 仓位管理与风控体系
 
-仓位管理与风控体系分布在 `core/engine/trader.py`、`core/risk/manager.py` 和 `core/risk/position.py`。它把订单数量、持仓状态、手续费、止盈止损、冷却期和熔断统一放在执行链路里处理。
+仓位管理与风控体系分布在 `core/engine/trader.py`、`core/risk/manager.py` 和 `core/risk/position_sizer.py`：
 
-- 仓位状态：使用字典或仓位辅助类维护 `size`、`entry_price`、`sl`、`tp`、`entry_time`、`leverage`。
-- 下单数量：根据账户权益、仓位比例、杠杆和 taker fee 估算订单数量，再通过 `ccxt` 精度规则校正。
-- 风控检查：`RiskManager` 负责资金费率风险、止盈止损、时间防御、冷却期和分级熔断。
-- 动态保护：交易执行器维护最大浮盈，支持保本止损和追踪止损。
-- 线程安全辅助：`core/risk/position.py` 使用 `threading.Lock` 保护仓位读写，适合后续扩展多线程监控。
-
-这一层是框架长期运行的安全边界。策略可以变化，但仓位和风控规则应该稳定、可测试、可复盘。
+- **强类型领域实体**：统一采用不可变/自计算领域模型 `Position`（`core/models/position.py`），封装入场价、杠杆倍数、动态止损止盈、名义价值与方向敏感浮盈，杜绝裸字典键缺失与隐式类型转换。
+- **动态风控拦截**：`RiskManager` 负责资金费率逆向套利防御、固定止损止盈、持仓时间防御与动态分级熔断。
+- **Kelly Criterion 动态资金管理**：`PositionSizer` 依据历史胜率、盈亏比与当前 ATR 波动率自适应计算半 Kelly 最优开仓比例与自适应杠杆，并在高回撤期线性缩减仓位。
 
 ### 6. 回测与日志系统
 
@@ -173,7 +163,7 @@ Bot 主循环 ──[bot_lock / api_lock]──> WebState ──> FastAPI WebSoc
 - 配置加载：`core/config/settings.py` 使用 `python-dotenv` 读取 `.env`，并做基础运行前校验。
 - 爆仓预警：`scripts/liquidation_alert.py` 使用 `requests` 轮询 Binance 强平订单 API，并通过邮件系统发送告警。
 - 异步和网络实验：依赖中保留 `aiohttp`，适合后续扩展异步数据抓取或外部服务调用。
-- 技术指标库：`core/analysis/indicators.py` 自维护常用指标实现，便于实盘和回测共享。
+- 技术指标库：`core/analysis/indicators/` 分类维护（trend, momentum, volatility, volume, utils）常用指标实现，便于实盘和回测共享。
 - 基础测试：`tests/` 使用 Python 标准库 `unittest` 覆盖风控、盘口分析、纸盘开平仓等核心行为。
 - 研究资产：`backtest/` 中保留 PNG、CSV 和实验脚本，方便把策略研究和实盘框架放在同一个工作目录中。
 
@@ -191,7 +181,7 @@ v0.2.0 在策略信号、仓位管理和分析能力上做了全面升级，目�
 - 强共识信号自动获得杠杆加成(+10%~15%)
 - 日志显示每个投票指标和最终得分，方便复盘
 
-**8.2 高级技术指标** (`core/analysis/indicators.py`)
+**8.2 高级技术指标** (`core/analysis/indicators/`)
 
 新增8个指标(总计20+):
 
@@ -261,40 +251,51 @@ Quest/
 ├── README.md
 │
 ├── core/                          # 核心业务逻辑
-│   ├── config/
+│   ├── gateway/                   # 【交易所网关层】门面模式统一接入
+│   │   ├── service.py             # ExchangeService 核心门面与订单路由
+│   │   ├── binance_stream.py      # Binance 组合流 WebSocket 订阅与自动保活
+│   │   └── domestic_feed.py       # 国内 A 股新浪直连数据源
+│   │
+│   ├── config/                    # 系统配置层
 │   │   ├── settings.py            # 默认配置、.env 加载、运行前校验
 │   │   ├── mode.py                # 交易模式状态机定义与切换校验
-│   │   └── exchange.py            # Binance REST + WebSocket 接入
+│   │   └── exchange.py            # 向后兼容网关垫片 (Shim)
 │   │
-│   ├── engine/
-│   │   ├── bot.py                 # 主循环，连接数据、策略、风控、交易和心跳
-│   │   ├── trader.py              # 交易执行器，管理开仓/平仓/持仓/报告记录
-│   │   └── alert_manager.py       # 运行中的告警辅助
+│   ├── models/                    # 领域实体层 (纯数据对象)
+│   │   └── position.py            # Position 强类型持仓模型
 │   │
-│   ├── strategy/
-│   │   ├── brain.py               # 策略大脑，维护多周期数据并输出分析上下文
-│   │   └── analyzers.py           # 多信号投票共识引擎和盘口分析
+│   ├── engine/                    # 交易调度层
+│   │   ├── bot.py                 # QuantBot 主循环协调器
+│   │   ├── switcher.py            # ModeSwitcher / SymbolSwitcher 两阶段热切换控制器
+│   │   ├── trader.py              # TradeExecutor 订单执行与滑点仿真
+│   │   ├── alert_manager.py       # 运行中的告警辅助
+│   │   └── state_store.py         # 基于 os.replace 的崩溃一致性状态落盘
 │   │
-│   ├── analysis/
-│   │   ├── indicators.py          # 技术指标实现 (SuperTrend, Ichimoku 等)
+│   ├── strategy/                  # 策略框架层
+│   │   ├── base.py                # BaseStrategy 策略标准抽象契约
+│   │   ├── microstructure.py      # OrderBookAnalyzer 盘口失衡与深度点差
+│   │   ├── brain.py               # StrategyBrain 多周期数据流与策略驱动
+│   │   └── analyzers.py           # SignalEngine 11 信号加权投票引擎
+│   │
+│   ├── analysis/                  # 特征与分析层
+│   │   ├── indicators/            # 模块化技术指标包 (trend/momentum/volatility/volume/utils)
 │   │   ├── feature_engineering.py # 特征工程
 │   │   ├── bocpd.py               # BOCPD变点检测
 │   │   ├── regime.py              # HMM市场状态检测 (4状态)
 │   │   ├── performance.py         # 绩效分析 (Sharpe/Sortino/Calmar)
 │   │   └── monte_carlo.py         # 蒙特卡洛策略模拟
 │   │
-│   ├── risk/
-│   │   ├── manager.py             # 风控管理 (硬止盈止损)
-│   │   ├── position.py            # 仓位辅助
-│   │   └── position_sizer.py      # Kelly Criterion动态仓位管理
+│   ├── risk/                      # 风控与资金管理层
+│   │   ├── manager.py             # 风控管理 (硬止盈止损、时间防御、分级熔断)
+│   │   └── position_sizer.py      # Kelly Criterion 动态仓位与自适应杠杆
 │   │
-│   ├── ui/
+│   ├── ui/                        # 终端交互层
 │   │   ├── display.py             # Rich TUI 输出 (QUEST_CTA 启动面板与状态栏)
 │   │   └── input.py               # 键盘输入
 │   │
 │   ├── web/                       # Web GUI 后端
 │   │   ├── __init__.py
-│   │   ├── state.py               # 线程安全的共享状态管理
+│   │   ├── state.py               # 线程安全的共享状态管理 (deque 缓冲)
 │   │   ├── server.py              # FastAPI 服务器 (REST + WebSocket)
 │   │   ├── runner.py              # Web 线程管理器
 │   │   ├── models.py              # Pydantic 数据模型
