@@ -1,6 +1,7 @@
 """
 日志配置模块 - 配置全局日志系统
 """
+import copy
 import os
 import sys
 import logging
@@ -12,8 +13,12 @@ from colorama import Fore, Style, init
 # ============================================
 # 这对于PyCharm等IDE中的实时日志输出至关重要
 os.environ['PYTHONUNBUFFERED'] = '1'
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError, OSError):
+    # 非终端 / 被重定向的环境（如 uv run 管道、服务）不支持 reconfigure
+    pass
 
 from pathlib import Path
 from typing import Optional
@@ -29,6 +34,9 @@ class ColoredFormatter(logging.Formatter):
     RESET = '\033[0m'
 
     def format(self, record):
+        # 复制 record 再着色：直接改 record.levelname 会污染共享的
+        # LogRecord，导致重复着色与文件日志带 ANSI 转义码
+        record = copy.copy(record)
         log_color = self.COLORS.get(record.levelname, self.RESET)
         record.levelname = f"{log_color}{record.levelname}{self.RESET}"
         return super().format(record)

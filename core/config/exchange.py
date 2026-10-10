@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 import ccxt
 import requests
 import websocket
+from core.errors import OrderError
 from .settings import Config
 from colorama import Fore, Style
 
@@ -680,6 +681,12 @@ class ExchangeService:
             return amount
 
     def execute_order(self, side, amount, params=None):
+        """执行市价单。
+
+        纸盘：记录 paper_orders，恒返回 True。
+        实盘：失败时抛 OrderError（资金不足 / 网络 / 状态异常），
+        调用方必须捕获——静默回 False 会让策略误以为已成交。
+        """
         params = params or {}
         if not self.is_live:
             order = {
@@ -704,19 +711,16 @@ class ExchangeService:
             # 简单的成交确认
             if order and order.get('status') in ['closed', 'open']:
                 return True
-            else:
-                logger.warning(f"Order status invalid: {order.get('status')}")
-                return False
+            raise OrderError(f"Order status invalid: {order.get('status') if order else None}")
 
+        except OrderError:
+            raise
         except ccxt.InsufficientFunds as e:
-            logger.error(f"Insufficient Funds: {e}")
-            return False
+            raise OrderError(f"Insufficient funds: {e}") from e
         except ccxt.NetworkError as e:
-            logger.error(f"Network Error during order: {e}")
-            return False
+            raise OrderError(f"Network error during order: {e}") from e
         except Exception as e:
-            logger.error(f"Order Execution Error: {e}")
-            return False
+            raise OrderError(f"Order execution failed: {e}") from e
 
     def fetch_balance(self):
         """获取账户余额信息"""

@@ -3,6 +3,7 @@ import logging
 import time
 
 from core.config.settings import Config
+from core.errors import OrderError
 from core.models.position import Position
 from core.risk.position_sizer import PositionSizer
 
@@ -174,7 +175,16 @@ class TradeExecutor:
             return
 
         side = 'buy' if sig == 1 else 'sell'
-        if not self.exchange.execute_order(side, amount):
+        try:
+            self.exchange.execute_order(side, amount)
+        except OrderError as exc:
+            self.ui.log_msg(f"开仓下单失败: {exc}", "error")
+            logger.error("Entry order failed: %s", exc)
+            return
+        except Exception as exc:
+            # 兼容 Dummy/旧 exchange（如测试替身）抛出的非 OrderError
+            self.ui.log_msg(f"开仓下单失败: {exc}", "error")
+            logger.error("Entry order failed: %s", exc)
             return
 
         self.last_traded_candle_timestamp = timestamp
@@ -260,7 +270,16 @@ class TradeExecutor:
 
         pos_size = pos.size
         side = 'sell' if pos_size > 0 else 'buy'
-        if not self.exchange.execute_order(side, abs(pos_size), params={'reduceOnly': True}):
+        try:
+            self.exchange.execute_order(side, abs(pos_size), params={'reduceOnly': True})
+        except OrderError as exc:
+            # 平仓失败必须保留持仓，不能记账！
+            self.ui.log_msg(f"平仓下单失败，持仓保留: {exc}", "error")
+            logger.error("Exit order failed, position kept: %s", exc)
+            return
+        except Exception as exc:
+            self.ui.log_msg(f"平仓下单失败，持仓保留: {exc}", "error")
+            logger.error("Exit order failed, position kept: %s", exc)
             return
 
         entry = pos.entry_price
