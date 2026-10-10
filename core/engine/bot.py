@@ -84,6 +84,8 @@ class QuantBot:
         self.last_btc_price = 0.0
         self.exchange_connected = False
         self.bot_lock = threading.Lock()
+        # 防止 WebUI 连点导致并发切换
+        self._switch_lock = threading.Lock()
 
     def _validate_runtime_config(self):
         # 初始 DASHBOARD 模式不要求 API Key；切换到 LIVE 时由 switch_mode 校验
@@ -163,24 +165,29 @@ class QuantBot:
         return ok
 
     async def handle_control(self, request):
-        """WebUI 控制命令路由（由 /api/control 调用）"""
-        with self.bot_lock:
-            action = request.action
-            if action == "switch_mode":
-                if not request.mode:
-                    raise ValueError("switch_mode 需要 mode 参数")
-                return self.switch_mode(request.mode)
-            elif action == "switch_symbol":
-                if not request.symbol:
-                    raise ValueError("switch_symbol 需要 symbol 参数")
-                return self.switch_symbol(request.symbol)
-            elif action == "exit":
+        """WebUI 控制命令路由（由 /api/control 调用）。
+
+        锁策略：
+        - switch_mode / switch_symbol 内部各自管理 bot_lock —— 网络
+          预热必须在锁外执行，否则主循环会被几十秒的 IO 卡死；
+        - exit / pause / resume 这类瞬时操作直接持锁执行。
+        """
+        action = request.action
+        if action == "switch_mode":
+            if not request.mode:
+                raise ValueError("switch_mode 需要 mode 参数")
+            return self.switch_mode(request.mode)
+        if action == "switch_symbol":
+            if not request.symbol:
+                raise ValueError("switch_symbol 需要 symbol 参数")
+            return self.switch_symbol(request.symbol)
+        if action == "exit":
+            with self.bot_lock:
                 self._exit_procedure()
-                return "Exiting..."
-            elif action in ("pause", "resume"):
-                return f"Action {action} acknowledged (no-op)"
-            else:
-                raise ValueError(f"Unknown action: {action}")
+            return "Exiting..."
+        if action in ("pause", "resume"):
+            return f"Action {action} acknowledged (no-op)"
+        raise ValueError(f"Unknown action: {action}")
 
 
     def switch_mode(self, target_mode_str):
@@ -214,94 +221,115 @@ class QuantBot:
                     logger.error(msg)
                     raise ValueError(msg)
 
-            # 4. 重建 ExchangeService 并重连
-            old_exchange = self.exchange
-            try:
-                self.ui.log_msg(f"正在切换到 {target.label} 模式...", "info")
+            # 4. 锁外：创建并连接新的 ExchangeService（网络 IO）
+            #    连接期间主循环继续用旧 exchange 正常交易，不被卡住
+            new_is_live = (target == TradingMode.LIVE)
+            new_exchange = ExchangeService(new_is_live)
+            self.ui.log_msg(f"正在切换到 {target.label} 模式...", "info")
 
-                new_is_live = (target == TradingMode.LIVE)
-                self.exchange = ExchangeService(new_is_live)
-                ok, err_msg = self.exchange.connect()
-                if not ok:
-                    # 回滚：恢复旧 exchange
-                    self.exchange = old_exchange
-                    msg = f"切换失败: 交易所重连失败 ({err_msg})"
-                    logger.error(msg)
+            ok, err_msg = new_exchange.connect()
+            if not ok:
+                new_exchange.close()
+                msg = f"切换失败: 交易所重连失败 ({err_msg})"
+                logger.error(msg)
+                raise ValueError(msg)
+
+            # 锁外取余额（走新 exchange 自己的 api_lock，与主循环无竞争）
+            balance_info = new_exchange.fetch_balance()
+
+            # 5. 锁内：原子交换共享状态
+            with self.bot_lock:
+                if not self.trader.position.is_flat:
+                    # 极小概率：连接期间产生了持仓，放弃切换
+                    new_exchange.close()
+                    msg = f"当前有持仓，禁止切换模式 (size={self.trader.position.size})"
+                    logger.warning(msg)
                     raise ValueError(msg)
 
-                old_exchange.close()
-
+                old_exchange = self.exchange
+                self.exchange = new_exchange
+                self.trader.exchange = new_exchange
                 self.is_live = new_is_live
-                self.trader.exchange = self.exchange
                 self.trading_mode = target
                 self.mode_name = target.label
 
-                # 5. 更新余额与 Web 状态
-                self._fetch_balance()
-                self.web_state.set_trading_mode(target.value)
-                self.web_state.update_account(
-                    balance=self.trader.balance,
-                    mode=target.value.capitalize(),
-                    symbol=Config.SYMBOL,
+                if balance_info:
+                    self.trader.update_balance(balance_info['total'])
+
+            # 锁外关闭旧连接
+            old_exchange.close()
+
+            # 6. 更新 Web 状态
+            self.web_state.set_trading_mode(target.value)
+            self.web_state.update_account(
+                balance=self.trader.balance,
+                mode=target.value.capitalize(),
+                symbol=Config.SYMBOL,
+            )
+
+            if balance_info:
+                self.ui.log_msg(
+                    f"{target.label} Balance: Free ${balance_info['free']:.2f} | "
+                    f"Total ${balance_info['total']:.2f}",
+                    "success",
                 )
 
-                self.ui.log_msg(f"✅ 已切换到 {target.label} 模式", "success")
-                logger.info(f"Trading mode switched: {current.value} -> {target.value}")
-                return f"已切换到 {target.label} 模式"
-            except ValueError:
-                # 校验类错误，直接向上抛
-                self.exchange = old_exchange
-                self.trader.exchange = old_exchange
-                raise
-            except Exception as exc:
-                # 异常回滚
-                self.exchange = old_exchange
-                self.trader.exchange = old_exchange
-                msg = f"切换模式异常: {exc}"
-                logger.exception("switch_mode failed")
-                raise ValueError(msg) from exc
+            self.ui.log_msg(f"✅ 已切换到 {target.label} 模式", "success")
+            logger.info(f"Trading mode switched: {current.value} -> {target.value}")
+            return f"已切换到 {target.label} 模式"
 
     def switch_symbol(self, target_symbol: str):
-        """切换交易/看盘标的 (支持 BTC, ETH, SOL 等)"""
-        symbol = Config.set_symbol(target_symbol)
+        """切换交易/看盘标的。
 
-        if symbol == self.exchange.symbol:
-            return f"Already on {symbol}"
+        两阶段设计：
+        - 阶段 1（不持 bot_lock）：历史拉取 + 独立 brain 预热，
+          主循环继续用旧标的正常跑，不被几十秒的 IO 卡死；
+        - 阶段 2（持 bot_lock）：原子交换 brain/exchange/tick 缓存。
+        """
+        new_symbol = Config.normalize_symbol(target_symbol)
 
-        logger.info(f"Switching trading/watching symbol to {symbol}...")
-        self.ui.log_msg(f"Switching symbol to {symbol}...", "info")
+        if new_symbol == self.exchange.symbol:
+            return f"Already on {new_symbol}"
 
-        # 1. 修改 ExchangeService 的 symbol 属性
-        self.exchange.symbol = symbol
-        self.exchange.is_domestic = symbol.lower().startswith(('sh', 'sz'))
-        
-        # 2. 清理 brain 中的旧特征和历史缓存
-        self.brain.history_5m = pd.DataFrame(columns=self.brain.HISTORY_COLUMNS)
-        self.brain.history_15m = pd.DataFrame(columns=self.brain.HISTORY_COLUMNS)
-        self.brain.history_1h = pd.DataFrame(columns=self.brain.HISTORY_COLUMNS)
-        if hasattr(self.brain, 'history_1d'):
-            self.brain.history_1d = pd.DataFrame(columns=self.brain.HISTORY_COLUMNS)
-        self.brain.cached_analysis_data = None
-        self.last_btc_price = 0.0
-        self.last_tick_price = 0.0
-        self.last_tick_analysis = None
-        self.current_candle_timestamp = 0
+        if not self._switch_lock.acquire(blocking=False):
+            raise ValueError("已有切换任务进行中，请稍候")
 
-        # 3. 更新 Web 共享状态中的 symbol 属性
-        self.web_state.update_account(symbol=symbol)
-        
-        # 4. 重新进行 Warming up 获取新标的的历史 K 线
-        self._warmup_models()
-        
-        # 5. 立刻更新一次 REST 接口下的最新报价和深度缓存
-        if self.exchange.is_rest_only:
-            try:
-                self.exchange._update_rest_data()
-            except Exception as e:
-                logger.error(f"Error updating REST data after symbol switch: {e}")
+        try:
+            logger.info(f"Switching trading/watching symbol to {new_symbol}...")
+            self.ui.log_msg(f"Switching symbol to {new_symbol}...", "info")
+            self.web_state.set_status("switching")
 
-        self.ui.log_msg(f"✅ Symbol switched to {symbol}", "success")
-        return f"Successfully switched to {symbol}"
+            # ---------- 阶段 1：锁外预热（历史拉取 + 独立 brain） ----------
+            new_brain, analysis, last_ts = self._build_warmup_brain(new_symbol)
+
+            # ---------- 阶段 2：锁内原子交换 ----------
+            with self.bot_lock:
+                Config.set_symbol(new_symbol)
+                self.exchange.apply_symbol(new_symbol)
+                self.brain = new_brain
+                self.trader.brain = new_brain
+                self.last_tick_analysis = analysis
+                self.last_tick_price = 0.0
+                self.last_btc_price = 0.0
+                if last_ts:
+                    self.current_candle_timestamp = last_ts
+
+            self._push_warmup_market(new_brain, analysis)
+            self.web_state.update_account(
+                balance=self.trader.balance,
+                mode=self.trading_mode.value.capitalize(),
+                symbol=new_symbol,
+            )
+            self.web_state.set_status("running")
+
+            self.ui.log_msg(f"✅ Symbol switched to {new_symbol}", "success")
+            return f"Successfully switched to {new_symbol}"
+        except Exception as exc:
+            self.web_state.set_status("running")
+            logger.exception("switch_symbol failed")
+            raise ValueError(f"切换标的异常: {exc}") from exc
+        finally:
+            self._switch_lock.release()
 
     def _init_redis(self):
         if not Config.ENABLE_MAIL_REPORT:
@@ -430,48 +458,23 @@ class QuantBot:
     def _warmup_models(self):
         self.ui.log_msg("Warming up models...", "info")
         try:
-            data = self._fetch_warmup_data()
-            candles_5m = data.get('5m', [])
-            candles_15m = data.get('15m', [])
-            candles_1h = data.get('1h', [])
-            candles_1d = data.get('1d', [])
-
-            if not (candles_5m and candles_15m and candles_1h):
-                self.ui.log_msg("⚠️ Warmup Data Empty - Starting with minimal state", "warning")
-                return
-
-            self._ingest_warmup_candles(candles_5m, '5m', step=20)
-            self._ingest_warmup_candles(candles_15m, '15m', step=10)
-            self._ingest_warmup_candles(candles_1h, '1h', step=5)
-            self._ingest_warmup_candles(candles_1d, '1d', step=1)
-            self.current_candle_timestamp = candles_5m[-1][0]
-            self.ui.log_msg("✅ Warmup Complete", "success")
-
-            if Config.WEB_ENABLED:
-                history_list = self.brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                history_15m = self.brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                history_1h = self.brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                history_1d = self.brain.history_1d[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-
-                self.web_state.update_market(
-                    kline_5m=history_list,
-                    kline_15m=history_15m,
-                    kline_1h=history_1h,
-                    kline_1d=history_1d
-                )
-
-            # 立即计算第一次初始分析结果并存入缓存，防止首个5m周期内指标显示 0.0
-            initial_book = self.exchange._cached_latest.get('orderbook') if hasattr(self.exchange, '_cached_latest') else None
-            self.last_tick_analysis = self.brain.analyze(initial_book)
+            brain, analysis, last_ts = self._build_warmup_brain(Config.SYMBOL)
+            self.brain = brain
+            self.trader.brain = brain
+            # 立即存入初始分析，防止首个5m周期内指标显示 0.0
+            self.last_tick_analysis = analysis
+            if last_ts:
+                self.current_candle_timestamp = last_ts
+            self._push_warmup_market(brain, analysis)
         except Exception as exc:
             self.ui.log_msg(f"❌ Warmup Error: {exc}", "error")
             logger.exception("Warmup traceback")
 
-    def _fetch_warmup_data(self):
+    def _fetch_warmup_data(self, symbol=None):
         self.ui.log_msg("Fetching historical data from exchange...", "info")
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self.exchange.fetch_initial_history, 100)
+            future = executor.submit(self.exchange.fetch_initial_history, 100, symbol)
             try:
                 return future.result(timeout=self.WARMUP_TIMEOUT_SECONDS)
             except concurrent.futures.TimeoutError:
@@ -481,10 +484,52 @@ class QuantBot:
                 )
                 return {'5m': [], '15m': [], '1h': [], '1d': []}
 
-    def _ingest_warmup_candles(self, candles, timeframe, step):
+    def _build_warmup_brain(self, symbol):
+        """锁外：为指定标的构建预热完成的新 StrategyBrain。
+
+        返回 (brain, analysis, last_ts)；历史全空时返回 (空 brain, None, 0)。
+        """
+        data = self._fetch_warmup_data(symbol=symbol)
+        candles_5m = data.get('5m', [])
+        candles_15m = data.get('15m', [])
+        candles_1h = data.get('1h', [])
+        candles_1d = data.get('1d', [])
+
+        new_brain = StrategyBrain()
+        if not (candles_5m and candles_15m and candles_1h):
+            self.ui.log_msg("⚠️ Warmup Data Empty - Starting with minimal state", "warning")
+            return new_brain, None, 0
+
+        self._ingest_warmup_candles(candles_5m, '5m', step=20, brain=new_brain)
+        self._ingest_warmup_candles(candles_15m, '15m', step=10, brain=new_brain)
+        self._ingest_warmup_candles(candles_1h, '1h', step=5, brain=new_brain)
+        self._ingest_warmup_candles(candles_1d, '1d', step=1, brain=new_brain)
+        self.ui.log_msg("✅ Warmup Complete", "success")
+
+        initial_book = self.exchange._cached_latest.get('orderbook') if hasattr(self.exchange, '_cached_latest') else None
+        return new_brain, new_brain.analyze(initial_book), candles_5m[-1][0]
+
+    def _push_warmup_market(self, brain, analysis):
+        """切换后把新标的 K 线推给 Web（不依赖 self.brain）。"""
+        if not Config.WEB_ENABLED:
+            return
+        history_list = brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
+        history_15m = brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
+        history_1h = brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
+        history_1d = brain.history_1d[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
+
+        self.web_state.update_market(
+            kline_5m=history_list,
+            kline_15m=history_15m,
+            kline_1h=history_1h,
+            kline_1d=history_1d
+        )
+
+    def _ingest_warmup_candles(self, candles, timeframe, step, brain=None):
+        target = brain if brain is not None else self.brain
         self.ui.log_msg(f"Processing {len(candles)} {timeframe} candles...", "info")
         for index, candle in enumerate(candles, start=1):
-            self.brain.ingest_candle(candle, timeframe)
+            target.ingest_candle(candle, timeframe)
             if index % step == 0:
                 self.ui.log_msg(f"  Processed {index}/{len(candles)} {timeframe} candles", "info")
 

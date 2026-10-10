@@ -22,22 +22,7 @@ class MarketDataStreamer(threading.Thread):
         self.ws = None
 
         # Binance Stream 名称必须小写，强制转换防止配置错误
-        symbol_lower = Config.SYMBOL_WS.lower()
-        
-        # 提取基础 WS 域名并拼接 streams 参数
-        base_ws_url = Config.BINANCE_WS_URL
-        if "?" in base_ws_url:
-            base_ws_url = base_ws_url.split("?")[0]
-
-        self.url = (
-            f"{base_ws_url}?streams="
-            f"{symbol_lower}@kline_5m/"
-            f"{symbol_lower}@kline_15m/"
-            f"{symbol_lower}@kline_1h/"
-            f"{symbol_lower}@depth20@100ms/"
-            f"{symbol_lower}@markPrice/"
-            f"btcusdt@kline_1m"
-        )
+        self.url = self._build_url()
 
         # 线程安全的数据存储
         self.lock = threading.Lock()
@@ -52,6 +37,41 @@ class MarketDataStreamer(threading.Thread):
         }
         self.running = True
         self._last_update_time = time.time()
+
+    @staticmethod
+    def _build_url():
+        """根据当前 Config.SYMBOL_WS 构造 Binance 组合流地址。"""
+        symbol_lower = Config.SYMBOL_WS.lower()
+
+        # 提取基础 WS 域名并拼接 streams 参数
+        base_ws_url = Config.BINANCE_WS_URL
+        if "?" in base_ws_url:
+            base_ws_url = base_ws_url.split("?")[0]
+
+        return (
+            f"{base_ws_url}?streams="
+            f"{symbol_lower}@kline_5m/"
+            f"{symbol_lower}@kline_15m/"
+            f"{symbol_lower}@kline_1h/"
+            f"{symbol_lower}@depth20@100ms/"
+            f"{symbol_lower}@markPrice/"
+            f"btcusdt@kline_1m"
+        )
+
+    def set_symbol(self):
+        """标的切换：重建订阅地址并触发重连，保留已缓存的数据。
+
+        run() 每轮循环都会读取 self.url，所以这里只要关闭当前
+        连接，线程就会用新地址自动重连，无需销毁重建线程。
+        """
+        self.url = self._build_url()
+        ws = self.ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception as exc:
+                logger.warning(f"[WS] Failed to close for symbol switch: {exc}")
+        logger.info(f"[WS] Subscribing to new symbol stream: {self.url}")
 
     def run(self):
         while self.running:
@@ -181,12 +201,22 @@ class DomesticDataStreamer(threading.Thread):
             'is_ready': False
         }
 
+    def set_symbol(self, new_symbol):
+        """标的切换：更新订阅代码，下一轮轮询即生效。"""
+        self.symbol = new_symbol.lower()
+        logger.info(f"[Domestic] Switching feed to {self.symbol}")
+
     def run(self):
         logger.info(f"Starting DomesticDataStreamer for {self.symbol}...")
         headers = {"Referer": "https://finance.sina.com.cn/"}
         url = f"http://hq.sinajs.cn/list={self.symbol}"
         
         while self.running:
+            # 标的切换时 self.symbol 已更新，重建 URL 后继续轮询
+            expected_url = f"http://hq.sinajs.cn/list={self.symbol}"
+            if url != expected_url:
+                url = expected_url
+                logger.info(f"[Domestic] Feed URL updated: {url}")
             try:
                 resp = requests.get(url, headers=headers, timeout=5)
                 if resp.status_code == 200:
@@ -409,12 +439,51 @@ class ExchangeService:
             sys.stdout.flush()
             return False, f"Connection Failed: {str(e)}"
 
-    def fetch_initial_history(self, limit=100):
+    def apply_symbol(self, symbol: str) -> None:
+        """切换服务的交易标的并让实时数据源跟进。
+
+        调用方应在持有 bot_lock 时调用（会触碰 ws_streamer 状态）。
+        本方法只做属性/订阅地址更新，网络预热必须在锁外完成。
+        """
+        old_symbol = self.symbol
+        self.symbol = symbol
+        self.is_domestic = symbol.lower().startswith(('sh', 'sz'))
+
+        streamer = self.ws_streamer
+        if streamer is None:
+            # REST-only：轮询线程每轮重读 self.symbol，无需重建
+            logger.info(f"[Symbol] REST feed switched {old_symbol} -> {symbol}")
+            return
+
+        is_domestic_streamer = isinstance(streamer, DomesticDataStreamer)
+        if is_domestic_streamer != self.is_domestic:
+            # 加密货币 <-> A股 两种数据源类型不同，无法热切换
+            logger.warning(
+                f"[Symbol] Feed type mismatch ({old_symbol} -> {symbol}); "
+                "restart required to switch between crypto and domestic feeds"
+            )
+            return
+
+        if self.is_domestic:
+            streamer.set_symbol(symbol)
+        else:
+            # Binance WS：重建订阅地址并触发自动重连
+            streamer.set_symbol()
+        logger.info(f"[Symbol] Live feed switched {old_symbol} -> {symbol}")
+
+    def fetch_initial_history(self, limit=100, symbol=None):
+        """拉取历史 K 线。
+
+        symbol 不传时使用当前标的；传入时只读取该标的，
+        用于切换标的时在 bot_lock 之外做预热（不触碰共享状态）。
+        """
+        target = symbol or self.symbol
+
         if self.is_domestic:
             try:
                 def fetch_sina(scale, lim):
                     try:
-                        return self._fetch_domestic_history(scale, lim)
+                        return self._fetch_domestic_history(scale, lim, symbol=target)
                     except Exception:
                         return []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -449,9 +518,9 @@ class ExchangeService:
 
         def fetch_one(tf, lim):
             try:
-                return temp_client.fetch_ohlcv(self.symbol, tf, limit=lim)
+                return temp_client.fetch_ohlcv(target, tf, limit=lim)
             except Exception as ex:
-                logger.error(f"[History Fetch One Error] {self.symbol} {tf}: {ex}")
+                logger.error(f"[History Fetch One Error] {target} {tf}: {ex}")
                 return []
 
         try:
@@ -479,8 +548,9 @@ class ExchangeService:
                 pass
             return {'5m': [], '15m': [], '1h': [], '1d': []}
 
-    def _fetch_domestic_history(self, scale, limit):
-        url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol={self.symbol}&scale={scale}&ma=no&datalen={limit}"
+    def _fetch_domestic_history(self, scale, limit, symbol=None):
+        target = symbol or self.symbol
+        url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol={target}&scale={scale}&ma=no&datalen={limit}"
         headers = {"Referer": "https://finance.sina.com.cn/"}
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
