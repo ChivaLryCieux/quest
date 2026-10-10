@@ -9,7 +9,7 @@ import pandas as pd
 import redis
 from colorama import init
 
-from core.config.exchange import ExchangeService
+from core.gateway import ExchangeService
 from core.config.settings import Config
 from core.config.mode import TradingMode, can_switch, parse_mode
 from core.engine.trader import TradeExecutor

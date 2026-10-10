@@ -40,7 +40,7 @@ dev = []
 quest-bot = "run:main"
 
 [tool.setuptools]
-packages = ["core", "core.config", "core.engine", "core.analysis", "core.strategy", "core.risk", "core.ui", "core.utils", "core.web"]
+packages = ["core", "core.config", "core.gateway", "core.engine", "core.analysis", "core.analysis.indicators", "core.strategy", "core.risk", "core.ui", "core.utils", "core.web"]
 
 [tool.setuptools.package-data]
 core = ["*.yaml", "*.yml", "*.json"]
