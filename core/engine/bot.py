@@ -15,6 +15,7 @@ from core.config.mode import TradingMode, can_switch, parse_mode
 from core.engine.trader import TradeExecutor
 from core.engine.alert_manager import AlertManager
 from core.engine.state_store import StateStore
+from core.engine.switcher import ModeSwitcher, SymbolSwitcher, WarmupCoordinator
 from core.models.position import Position
 from core.risk.manager import RiskManager
 from core.strategy.brain import StrategyBrain
@@ -86,6 +87,8 @@ class QuantBot:
         self.bot_lock = threading.Lock()
         # 防止 WebUI 连点导致并发切换
         self._switch_lock = threading.Lock()
+        self.mode_switcher = ModeSwitcher(self)
+        self.symbol_switcher = SymbolSwitcher(self)
 
     def _validate_runtime_config(self):
         # 初始 DASHBOARD 模式不要求 API Key；切换到 LIVE 时由 switch_mode 校验
@@ -190,146 +193,13 @@ class QuantBot:
         raise ValueError(f"Unknown action: {action}")
 
 
-    def switch_mode(self, target_mode_str):
-        """切换交易模式（仅允许单向升级：DASHBOARD -> PAPER -> LIVE）
+    def switch_mode(self, target_mode_str: str) -> str:
+        """切换交易模式（仅允许单向升级：DASHBOARD -> PAPER -> LIVE）"""
+        return self.mode_switcher.switch(target_mode_str)
 
-        切换到 LIVE 需校验 API Key；有持仓时禁止切换。
-        成功返回 message 字符串；失败抛 ValueError（由 server.py 的 except 捕获）。
-        """
-        target = parse_mode(target_mode_str)
-
-        with self._mode_lock:
-            current = self.trading_mode
-
-            # 1. 单向升级校验
-            if not can_switch(current, target):
-                msg = f"不允许降级或同级切换: {current.value} -> {target.value}"
-                logger.warning(msg)
-                raise ValueError(msg)
-
-            # 2. 无持仓校验
-            if not self.trader.position.is_flat:
-                msg = f"当前有持仓，禁止切换模式 (size={self.trader.position.size})"
-                logger.warning(msg)
-                raise ValueError(msg)
-
-            # 3. LIVE 模式校验 API Key
-            if target == TradingMode.LIVE:
-                issues = Config.validate_for_mode(is_live=True)
-                if issues:
-                    msg = f"实盘模式校验失败: {'; '.join(issues)}"
-                    logger.error(msg)
-                    raise ValueError(msg)
-
-            # 4. 锁外：创建并连接新的 ExchangeService（网络 IO）
-            #    连接期间主循环继续用旧 exchange 正常交易，不被卡住
-            new_is_live = (target == TradingMode.LIVE)
-            new_exchange = ExchangeService(new_is_live)
-            self.ui.log_msg(f"正在切换到 {target.label} 模式...", "info")
-
-            ok, err_msg = new_exchange.connect()
-            if not ok:
-                new_exchange.close()
-                msg = f"切换失败: 交易所重连失败 ({err_msg})"
-                logger.error(msg)
-                raise ValueError(msg)
-
-            # 锁外取余额（走新 exchange 自己的 api_lock，与主循环无竞争）
-            balance_info = new_exchange.fetch_balance()
-
-            # 5. 锁内：原子交换共享状态
-            with self.bot_lock:
-                if not self.trader.position.is_flat:
-                    # 极小概率：连接期间产生了持仓，放弃切换
-                    new_exchange.close()
-                    msg = f"当前有持仓，禁止切换模式 (size={self.trader.position.size})"
-                    logger.warning(msg)
-                    raise ValueError(msg)
-
-                old_exchange = self.exchange
-                self.exchange = new_exchange
-                self.trader.exchange = new_exchange
-                self.is_live = new_is_live
-                self.trading_mode = target
-                self.mode_name = target.label
-
-                if balance_info:
-                    self.trader.update_balance(balance_info['total'])
-
-            # 锁外关闭旧连接
-            old_exchange.close()
-
-            # 6. 更新 Web 状态
-            self.web_state.set_trading_mode(target.value)
-            self.web_state.update_account(
-                balance=self.trader.balance,
-                mode=target.value.capitalize(),
-                symbol=Config.SYMBOL,
-            )
-
-            if balance_info:
-                self.ui.log_msg(
-                    f"{target.label} Balance: Free ${balance_info['free']:.2f} | "
-                    f"Total ${balance_info['total']:.2f}",
-                    "success",
-                )
-
-            self.ui.log_msg(f"✅ 已切换到 {target.label} 模式", "success")
-            logger.info(f"Trading mode switched: {current.value} -> {target.value}")
-            return f"已切换到 {target.label} 模式"
-
-    def switch_symbol(self, target_symbol: str):
-        """切换交易/看盘标的。
-
-        两阶段设计：
-        - 阶段 1（不持 bot_lock）：历史拉取 + 独立 brain 预热，
-          主循环继续用旧标的正常跑，不被几十秒的 IO 卡死；
-        - 阶段 2（持 bot_lock）：原子交换 brain/exchange/tick 缓存。
-        """
-        new_symbol = Config.normalize_symbol(target_symbol)
-
-        if new_symbol == self.exchange.symbol:
-            return f"Already on {new_symbol}"
-
-        if not self._switch_lock.acquire(blocking=False):
-            raise ValueError("已有切换任务进行中，请稍候")
-
-        try:
-            logger.info(f"Switching trading/watching symbol to {new_symbol}...")
-            self.ui.log_msg(f"Switching symbol to {new_symbol}...", "info")
-            self.web_state.set_status("switching")
-
-            # ---------- 阶段 1：锁外预热（历史拉取 + 独立 brain） ----------
-            new_brain, analysis, last_ts = self._build_warmup_brain(new_symbol)
-
-            # ---------- 阶段 2：锁内原子交换 ----------
-            with self.bot_lock:
-                Config.set_symbol(new_symbol)
-                self.exchange.apply_symbol(new_symbol)
-                self.brain = new_brain
-                self.trader.brain = new_brain
-                self.last_tick_analysis = analysis
-                self.last_tick_price = 0.0
-                self.last_btc_price = 0.0
-                if last_ts:
-                    self.current_candle_timestamp = last_ts
-
-            self._push_warmup_market(new_brain, analysis)
-            self.web_state.update_account(
-                balance=self.trader.balance,
-                mode=self.trading_mode.value.capitalize(),
-                symbol=new_symbol,
-            )
-            self.web_state.set_status("running")
-
-            self.ui.log_msg(f"✅ Symbol switched to {new_symbol}", "success")
-            return f"Successfully switched to {new_symbol}"
-        except Exception as exc:
-            self.web_state.set_status("running")
-            logger.exception("switch_symbol failed")
-            raise ValueError(f"切换标的异常: {exc}") from exc
-        finally:
-            self._switch_lock.release()
+    def switch_symbol(self, target_symbol: str) -> str:
+        """切换交易/看盘标的（两阶段无感热切）"""
+        return self.symbol_switcher.switch(target_symbol)
 
     def _init_redis(self):
         if not Config.ENABLE_MAIL_REPORT:
@@ -458,80 +328,19 @@ class QuantBot:
     def _warmup_models(self):
         self.ui.log_msg("Warming up models...", "info")
         try:
-            brain, analysis, last_ts = self._build_warmup_brain(Config.SYMBOL)
+            brain, analysis, last_ts = WarmupCoordinator.build_warmup_brain(
+                self.exchange, self.ui, Config.SYMBOL
+            )
             self.brain = brain
             self.trader.brain = brain
             # 立即存入初始分析，防止首个5m周期内指标显示 0.0
             self.last_tick_analysis = analysis
             if last_ts:
                 self.current_candle_timestamp = last_ts
-            self._push_warmup_market(brain, analysis)
+            WarmupCoordinator.push_warmup_market(brain, self.web_state)
         except Exception as exc:
             self.ui.log_msg(f"❌ Warmup Error: {exc}", "error")
             logger.exception("Warmup traceback")
-
-    def _fetch_warmup_data(self, symbol=None):
-        self.ui.log_msg("Fetching historical data from exchange...", "info")
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self.exchange.fetch_initial_history, 100, symbol)
-            try:
-                return future.result(timeout=self.WARMUP_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                self.ui.log_msg(
-                    f"⚠️ Warmup timeout ({self.WARMUP_TIMEOUT_SECONDS}s). Continuing with empty data...",
-                    "warning",
-                )
-                return {'5m': [], '15m': [], '1h': [], '1d': []}
-
-    def _build_warmup_brain(self, symbol):
-        """锁外：为指定标的构建预热完成的新 StrategyBrain。
-
-        返回 (brain, analysis, last_ts)；历史全空时返回 (空 brain, None, 0)。
-        """
-        data = self._fetch_warmup_data(symbol=symbol)
-        candles_5m = data.get('5m', [])
-        candles_15m = data.get('15m', [])
-        candles_1h = data.get('1h', [])
-        candles_1d = data.get('1d', [])
-
-        new_brain = StrategyBrain()
-        if not (candles_5m and candles_15m and candles_1h):
-            self.ui.log_msg("⚠️ Warmup Data Empty - Starting with minimal state", "warning")
-            return new_brain, None, 0
-
-        self._ingest_warmup_candles(candles_5m, '5m', step=20, brain=new_brain)
-        self._ingest_warmup_candles(candles_15m, '15m', step=10, brain=new_brain)
-        self._ingest_warmup_candles(candles_1h, '1h', step=5, brain=new_brain)
-        self._ingest_warmup_candles(candles_1d, '1d', step=1, brain=new_brain)
-        self.ui.log_msg("✅ Warmup Complete", "success")
-
-        initial_book = self.exchange._cached_latest.get('orderbook') if hasattr(self.exchange, '_cached_latest') else None
-        return new_brain, new_brain.analyze(initial_book), candles_5m[-1][0]
-
-    def _push_warmup_market(self, brain, analysis):
-        """切换后把新标的 K 线推给 Web（不依赖 self.brain）。"""
-        if not Config.WEB_ENABLED:
-            return
-        history_list = brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_15m = brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_1h = brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_1d = brain.history_1d[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-
-        self.web_state.update_market(
-            kline_5m=history_list,
-            kline_15m=history_15m,
-            kline_1h=history_1h,
-            kline_1d=history_1d
-        )
-
-    def _ingest_warmup_candles(self, candles, timeframe, step, brain=None):
-        target = brain if brain is not None else self.brain
-        self.ui.log_msg(f"Processing {len(candles)} {timeframe} candles...", "info")
-        for index, candle in enumerate(candles, start=1):
-            target.ingest_candle(candle, timeframe)
-            if index % step == 0:
-                self.ui.log_msg(f"  Processed {index}/{len(candles)} {timeframe} candles", "info")
 
     def _tick(self):
         with self.bot_lock:
