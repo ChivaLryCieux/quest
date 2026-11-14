@@ -99,7 +99,7 @@ export interface Snapshot {
 
 // WebSocket 消息
 export interface WSMessage {
-  type: 'snapshot' | 'market' | 'price' | 'strategy' | 'position' | 'account' | 'trade' | 'alert' | 'system' | 'heartbeat';
+  type: 'snapshot' | 'market' | 'orderbook' | 'price' | 'strategy' | 'position' | 'account' | 'trade' | 'alert' | 'system' | 'heartbeat';
   data: any;
   timestamp: number;
 }
