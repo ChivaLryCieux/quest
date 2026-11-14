@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 from core.analysis.indicators import (
-    MomentumCalculator, RollingVolatilityCalculator, MathUtils,
+    MathUtils,
     BollingerBands, SuperTrend, MACDCalculator, KDJCalculator,
     ADXCalculator, VWAPCalculator,
     IchimokuCloud, StochasticRSI, OBVCalculator, CCICalculator,
@@ -14,19 +14,16 @@ from core.analysis.indicators import (
 class FeatureEngineer:
     """
     负责从原始K线数据中提取技术指标特征。
-    
+
     计算指标:
     1. 相对成交量, 动量, 波动率
     2. MACD, 布林带, SuperTrend
     3. KDJ, ADX, VWAP
     """
     def __init__(self):
-        # 统计因子计算器
         self.momentum_periods = [1, 10, 50, 96]
         self.volatility_periods = [5, 50, 96]
-        self.momentum_calc = MomentumCalculator(periods=self.momentum_periods)
-        self.volatility_calc = RollingVolatilityCalculator(periods=self.volatility_periods)
-        
+
         # 技术指标计算器
         self.bollinger = BollingerBands(period=20, std_mult=2.0)
         self.supertrend = SuperTrend(atr_period=10, multiplier=3.0)

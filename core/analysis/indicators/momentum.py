@@ -1,35 +1,6 @@
-from collections import deque
 import numpy as np
 import pandas as pd
 from .utils import MathUtils
-
-
-class MomentumCalculator:
-    def __init__(self, periods=[1, 5, 15, 30, 50, 96]):
-        self.periods = periods
-        self.max_len = max(periods) + 5
-        self.history = deque(maxlen=self.max_len)
-
-    def update(self, price):
-        """Update with new price and return momentum array."""
-        self.history.append(price)
-        return np.array(
-            [np.log(self.history[-1] / self.history[-(p + 1)]) if len(self.history) > p else 0.0
-             for p in self.periods])
-
-    def get_momentum(self, prices, T):
-        """Calculate momentum for a specific period T."""
-        if len(prices) <= T:
-            return None
-        momentum = prices[-1] / prices[-(T + 1)]
-        return np.log(momentum)
-
-    def calculate_all_momentums(self, prices):
-        """Calculate all momentum periods and return as dict."""
-        results = {}
-        for T in self.periods:
-            results[f"T_{T}"] = self.get_momentum(prices, T)
-        return results
 
 
 class MACDCalculator:

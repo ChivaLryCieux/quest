@@ -2,67 +2,6 @@ import numpy as np
 import pandas as pd
 
 
-class RollingVolatilityCalculator:
-    def __init__(self, periods=[5, 10, 25, 50]):
-        self.periods = periods
-
-    def update(self, price):
-        """Placeholder for online updates."""
-        return {}
-
-    def calculate_all_volatilities(self, prices_list):
-        """Calculate volatilities from price list."""
-        results = {}
-        # Data validation
-        if not prices_list or len(prices_list) < 2:
-            for w in self.periods:
-                results[f"T_{w}"] = 0.0
-            return results
-
-        try:
-            # Convert to numpy array and calculate log returns
-            arr = np.array(prices_list, dtype=float)
-            arr = np.maximum(arr, 1e-9)  # Avoid log(0)
-            log_returns = np.diff(np.log(arr))
-
-            # Calculate volatility for each window
-            for w in self.periods:
-                if len(log_returns) >= w:
-                    window_slice = log_returns[-w:]
-                    vol = np.std(window_slice)
-                    results[f"T_{w}"] = vol
-                else:
-                    if len(log_returns) > 0:
-                        results[f"T_{w}"] = np.std(log_returns)
-                    else:
-                        results[f"T_{w}"] = 0.0
-
-        except Exception:
-            for w in self.periods:
-                results[f"T_{w}"] = 0.0
-
-        return results
-
-    def calculate_from_history(self, history_df):
-        """Calculate volatilities from DataFrame."""
-        if len(history_df) < max(self.periods) + 2:
-            return {f"T_{t}": 0.0 for t in self.periods}
-
-        log_returns = np.log(history_df['close'] / history_df['close'].shift(1)).fillna(0)
-
-        vol_values = {}
-        for T in self.periods:
-            if len(log_returns) >= T:
-                vol = log_returns.tail(T).std()
-                if np.isnan(vol):
-                    vol = 0.0
-                vol_values[f"T_{T}"] = vol
-            else:
-                vol_values[f"T_{T}"] = 0.0
-
-        return vol_values
-
-
 class BollingerBands:
     """布林带指标 (20周期, 2倍标准差)"""
 
