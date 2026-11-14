@@ -24,6 +24,7 @@
   - 高波动 → 降低仓位/收紧止损
 """
 
+import concurrent.futures
 import logging
 import warnings
 import numpy as np
@@ -67,14 +68,17 @@ class RegimeDetector:
         self.bars_since_train = 0
         self.is_fitted = False
         self._feature_cache = []
+        # HMM fit 移到独立线程：update() 只做 O(30) predict，不阻塞交易循环
+        self._fit_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hmm-fit")
+        self._fit_future = None
 
-    def _extract_features(self, df: pd.DataFrame) -> np.ndarray:
-        """从K线DataFrame提取HMM输入特征"""
-        if len(df) < 20:
+    def _extract_features(self, close, volume) -> np.ndarray:
+        """从 close/volume 数组提取 HMM 输入特征"""
+        close = np.asarray(close, dtype=float)
+        volume = np.asarray(volume, dtype=float)
+        if len(close) < 20:
             return np.array([])
-
-        close = df['close'].values
-        volume = df['volume'].values
 
         # 1. 对数收益率
         log_returns = np.diff(np.log(np.maximum(close, 1e-9)))
@@ -110,16 +114,27 @@ class RegimeDetector:
         return features
 
     def fit(self, df: pd.DataFrame) -> bool:
-        """训练HMM模型"""
+        """训练HMM模型（同步接口，供脚本/测试直接调用）"""
+        res = self._fit_arrays(df['close'].values, df['volume'].values)
+        if res is None:
+            return False
+        self.model, self.current_state, self.state_probs = res
+        self.is_fitted = True
+        self.bars_since_train = 0
+        logger.info(f"HMM fitted: {self.n_states} states, current={MarketRegime.label(self.current_state)}")
+        return True
+
+    def _fit_arrays(self, close, volume):
+        """worker 线程内执行：训练 HMM 并返回 (model, state, probs)。"""
         try:
             from hmmlearn.hmm import GaussianHMM
         except ImportError:
             logger.warning("hmmlearn not installed, regime detection disabled")
-            return False
+            return None
 
-        features = self._extract_features(df)
+        features = self._extract_features(close, volume)
         if len(features) < 50:
-            return False
+            return None
 
         try:
             model = GaussianHMM(
@@ -130,45 +145,71 @@ class RegimeDetector:
                 tol=1e-4,
             )
             model.fit(features)
-            self.model = model
-            self.is_fitted = True
-            self.bars_since_train = 0
-
-            # 预测当前状态
             states = model.predict(features)
-            self.current_state = int(states[-1])
-            self.state_probs = model.predict_proba(features)[-1]
-
-            logger.info(f"HMM fitted: {self.n_states} states, current={MarketRegime.label(self.current_state)}")
-            return True
-
+            return model, int(states[-1]), model.predict_proba(features)[-1]
         except Exception as e:
             logger.debug(f"HMM fit failed: {e}")
-            return False
+            return None
 
-    def update(self, df: pd.DataFrame) -> int:
+    def _submit_fit(self, close, volume):
+        """提交一次异步训练（快照拷贝，禁止并发多个 fit）。"""
+        if self._fit_future is not None:
+            return
+        c = np.array(close, dtype=float, copy=True)
+        v = np.array(volume, dtype=float, copy=True)
+        self._fit_future = self._fit_executor.submit(self._fit_arrays, c, v)
+
+    def _collect_fit(self):
+        """收割已完成的异步 fit 结果并原子换入模型。"""
+        if self._fit_future is None or not self._fit_future.done():
+            return
+        try:
+            res = self._fit_future.result()
+            if res is not None:
+                self.model, self.current_state, self.state_probs = res
+                self.is_fitted = True
+                self.bars_since_train = 0
+                logger.info(
+                    f"HMM fitted (async): {self.n_states} states, "
+                    f"current={MarketRegime.label(self.current_state)}")
+        except Exception as e:
+            logger.debug(f"Async HMM fit failed: {e}")
+        finally:
+            self._fit_future = None
+
+    def update(self, close, volume=None) -> int:
         """更新状态检测
 
         Args:
-            df: 包含close/volume列的DataFrame
+            close: 收盘价数组（或含 close/volume 列的 DataFrame，兼容旧接口）
+            volume: 成交量数组
 
         Returns:
             current_state: 当前市场状态 (0-3)
         """
+        if hasattr(close, 'columns'):
+            volume = close['volume'].values
+            close = close['close'].values
+        close = np.asarray(close, dtype=float)
+        volume = np.asarray(volume if volume is not None else np.zeros(len(close)), dtype=float)
+
+        # 收割上次异步训练结果
+        self._collect_fit()
+
         if not self.is_fitted or self.model is None:
-            # 首次调用或模型未就绪，尝试训练
-            if len(df) >= self.lookback:
-                self.fit(df.iloc[-self.lookback:])
+            # 首次调用或模型未就绪，提交异步训练
+            if len(close) >= self.lookback:
+                self._submit_fit(close[-self.lookback:], volume[-self.lookback:])
             return self.current_state
 
         self.bars_since_train += 1
 
-        # 定期重新训练
+        # 定期重新训练（异步，不阻塞主循环）
         if self.bars_since_train >= self.retrain_interval:
-            self.fit(df.iloc[-self.lookback:])
+            self._submit_fit(close[-self.lookback:], volume[-self.lookback:])
 
-        # 在线预测
-        features = self._extract_features(df.iloc[-30:])
+        # 在线预测 (O(30) features)
+        features = self._extract_features(close[-30:], volume[-30:])
         if len(features) == 0:
             return self.current_state
 

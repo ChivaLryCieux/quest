@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 
-from core.analysis.bocpd import BOCPDDetector
+from core.analysis.bocpd import IncrementalBOCPD
 from core.utils.mailer import MailService
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,8 @@ class AlertManager:
 
     def __init__(self):
         self.mail_service = MailService()
-        self.bocpd = BOCPDDetector()
+        self.bocpd = IncrementalBOCPD()
+        self._bocpd_fed_ts = None
         self.web_state = None
         self.last_bocpd_cp = None
         self.last_kdj_state = None
@@ -26,14 +27,22 @@ class AlertManager:
     def set_web_state(self, web_state):
         self.web_state = web_state
 
-    def check_and_alert(self, history_5m, analysis):
-        if history_5m is None or history_5m.empty or analysis is None:
+    @staticmethod
+    def _last_fields(ring_5m):
+        """从 CandleRing 取最后一根（成形中）蜡烛的 ts/close。"""
+        last = ring_5m.last_row
+        if last is None:
+            return None, 0.0
+        return int(last[0]), float(last[4])
+
+    def check_and_alert(self, ring_5m, analysis):
+        if ring_5m is None or len(ring_5m) == 0 or analysis is None:
             return
 
-        self._check_bocpd_alert(history_5m)
-        self._check_kdj_j_alert(history_5m, analysis)
-        self._check_macd_cross_alert(history_5m, analysis)
-        self._check_adx_alert(history_5m, analysis)
+        self._check_bocpd_alert(ring_5m)
+        self._check_kdj_j_alert(ring_5m, analysis)
+        self._check_macd_cross_alert(ring_5m, analysis)
+        self._check_adx_alert(ring_5m, analysis)
 
     def _check_macd_cross_alert(self, history_5m, analysis):
         adx = float(analysis.get('adx', 0.0))
@@ -67,9 +76,8 @@ class AlertManager:
         if self.last_macd_cross_state == state:
             return
 
-        last_row = history_5m.iloc[-1]
-        ts = datetime.fromtimestamp(int(last_row['timestamp']) / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        price = float(last_row['close'])
+        last_ts, price = self._last_fields(history_5m)
+        ts = datetime.fromtimestamp(last_ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
 
         subject = f"{icon} MACD交叉预警 | {label} | ADX {adx:.2f} > {self.MACD_CROSS_ADX_FILTER}"
         html = (
@@ -95,27 +103,33 @@ class AlertManager:
         self.last_macd_cross_state = state
         logger.warning("MACD cross alert triggered: state=%s, adx=%.2f", state, adx)
 
-    def _check_bocpd_alert(self, history_5m):
-        cps = self.bocpd.detect_changepoints(history_5m['close'].values)
-        if len(cps) == 0:
+    def _check_bocpd_alert(self, ring_5m):
+        # 增量喂入已收盘蜡烛（排除最后一根成形中蜡烛），按 ts 去重
+        arr = ring_5m.array()
+        cp_index = None
+        cp_row = None
+        for row in arr[:-1]:
+            ts = row[0]
+            if self._bocpd_fed_ts is not None and ts <= self._bocpd_fed_ts:
+                continue
+            self._bocpd_fed_ts = ts
+            if self.bocpd.update(float(row[4])) is not None:
+                cp_index = self.bocpd.last_cp_index
+                cp_row = row
+
+        if cp_index is None:
+            return
+        if self.last_bocpd_cp is not None and cp_index <= self.last_bocpd_cp:
             return
 
-        latest_cp = int(cps[-1])
-        if self.last_bocpd_cp is not None and latest_cp <= self.last_bocpd_cp:
-            return
-
-        if latest_cp != len(history_5m) - 1:
-            return
-
-        cp_row = history_5m.iloc[latest_cp]
-        ts = datetime.fromtimestamp(int(cp_row['timestamp']) / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        price = float(cp_row['close'])
+        ts = datetime.fromtimestamp(int(cp_row[0]) / 1000).strftime('%Y-%m-%d %H:%M:%S')
+        price = float(cp_row[4])
         subject = f"🚨 BOCPD变点预警 | {ts}"
         html = (
             f"<h3>检测到BOCPD变点</h3>"
             f"<p><b>时间:</b> {ts}</p>"
             f"<p><b>价格:</b> {price:.4f}</p>"
-            f"<p><b>变点索引:</b> {latest_cp}</p>"
+            f"<p><b>变点索引:</b> {cp_index}</p>"
         )
         self.mail_service.send_alert(subject, html)
 
@@ -124,11 +138,11 @@ class AlertManager:
             self.web_state.add_alert(
                 alert_type="BOCPD",
                 message=f"BOCPD变点预警 | 价格: {price:.4f}",
-                details={"price": price, "index": latest_cp, "time": ts},
+                details={"price": price, "index": cp_index, "time": ts},
             )
 
-        self.last_bocpd_cp = latest_cp
-        logger.warning("BOCPD changepoint alert triggered at index=%s", latest_cp)
+        self.last_bocpd_cp = cp_index
+        logger.warning("BOCPD changepoint alert triggered at index=%s", cp_index)
 
     def _check_kdj_j_alert(self, history_5m, analysis):
         kdj_j = float(analysis.get('kdj_j', 50.0))
@@ -153,9 +167,8 @@ class AlertManager:
         if self.last_kdj_state == state:
             return
 
-        last_row = history_5m.iloc[-1]
-        ts = datetime.fromtimestamp(int(last_row['timestamp']) / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        price = float(last_row['close'])
+        last_ts, price = self._last_fields(history_5m)
+        ts = datetime.fromtimestamp(last_ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
 
         subject = f"{icon} KDJ-J值预警 | {label} | ADX {adx:.2f} > {self.KDJ_ADX_FILTER}"
         html = (
@@ -190,9 +203,8 @@ class AlertManager:
         if self.adx_alert_active:
             return
 
-        last_row = history_5m.iloc[-1]
-        ts = datetime.fromtimestamp(int(last_row['timestamp']) / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        price = float(last_row['close'])
+        last_ts, price = self._last_fields(history_5m)
+        ts = datetime.fromtimestamp(last_ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
 
         subject = "🟣 ADX强趋势预警 | ADX > 75"
         html = (

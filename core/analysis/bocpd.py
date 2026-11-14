@@ -3,6 +3,107 @@ import pandas as pd
 from scipy.special import gammaln
 
 
+class IncrementalBOCPD:
+    """BOCPD 增量检测器：常驻 run-length 后验，每根收盘 O(R) 更新。
+
+    与 BOCPDDetector.detect_changepoints 的逐步语义等价
+    （同一个递推公式，只是后验数组常驻而非每次重算）。
+    当后验长度超过 max_runlen 时截断尾部（保留最高概率区），
+    控制稳态开销。
+    """
+
+    MU0, KAPPA0, ALPHA0, BETA0 = 0.0, 0.1, 2.0, 0.0001
+
+    def __init__(self, ema_span=5, hazard_lambda=30, drop_thresh=8,
+                 min_gap=5, max_runlen=288):
+        self.ema_alpha = 2.0 / (ema_span + 1)
+        self.hazard = 1.0 / hazard_lambda
+        self.drop_thresh = drop_thresh
+        self.min_gap = min_gap
+        self.max_runlen = max_runlen
+
+        self._prev_close = None
+        self._ema = 0.0
+        self._ema_on = False
+
+        self._lrl = np.array([0.0])                     # log run-length 后验
+        self._mu = np.array([self.MU0])
+        self._kappa = np.array([self.KAPPA0])
+        self._alpha = np.array([self.ALPHA0])
+        self._beta = np.array([self.BETA0])
+
+        self._n = 0           # 已处理 close 数量
+        self._prev_mode = 0
+        self._last_cp = -min_gap
+        self.last_cp_index: int | None = None
+
+    @staticmethod
+    def _st_logpdf(x, alpha, beta, kappa, mu):
+        return BOCPDDetector._st_logpdf(x, alpha, beta, kappa, mu)
+
+    def update(self, close_price: float) -> int | None:
+        """喂入一根收盘价。若本根检测到变点，返回其 close 下标，否则 None。"""
+        price = float(close_price)
+        prev, self._prev_close = self._prev_close, price
+        self._n += 1
+        if prev is None:
+            return None
+
+        # signal = log_ret - ema_lag（ema 滞后一项，与批量 _build_signal 一致）
+        r = np.log(max(price, 1e-10) / max(prev, 1e-10))
+        if not self._ema_on:
+            x = r - 0.0
+            self._ema = r
+            self._ema_on = True
+        else:
+            x = r - self._ema
+            self._ema += (r - self._ema) * self.ema_alpha
+
+        # BOCPD 单步：增长 run-length / 变点重启
+        log_pred = self._st_logpdf(x, self._alpha, self._beta, self._kappa, self._mu)
+        log_joint = self._lrl + log_pred
+        next_lrl = np.concatenate([
+            [np.logaddexp.reduce(log_joint) + np.log(self.hazard)],
+            log_joint + np.log(1.0 - self.hazard),
+        ])
+        next_lrl -= np.logaddexp.reduce(next_lrl)
+        self._lrl = next_lrl
+
+        kappa_new = self._kappa + 1.0
+        mu_new = (self._kappa * self._mu + x) / kappa_new
+        alpha_new = self._alpha + 0.5
+        beta_new = self._beta + self._kappa * (x - self._mu) ** 2 / (2.0 * kappa_new)
+        self._mu = np.concatenate([[self.MU0], mu_new])
+        self._kappa = np.concatenate([[self.KAPPA0], kappa_new])
+        self._alpha = np.concatenate([[self.ALPHA0], alpha_new])
+        self._beta = np.concatenate([[self.BETA0], beta_new])
+
+        # 截断：保留前 max_runlen 个 run-length（最高概率区）
+        if len(self._lrl) > self.max_runlen:
+            self._lrl = self._lrl[:self.max_runlen]
+            self._mu = self._mu[:self.max_runlen]
+            self._kappa = self._kappa[:self.max_runlen]
+            self._alpha = self._alpha[:self.max_runlen]
+            self._beta = self._beta[:self.max_runlen]
+            self._lrl -= np.logaddexp.reduce(self._lrl)
+
+        mode = int(np.argmax(np.exp(self._lrl)))
+        # 批量语义: mode_rl[0] = mode_rl[1]（首点重复，不产生 drop）
+        # len(close)<30 时批量整体返回空 —— 变点登记占位但不触发
+        cp = None
+        if self._n == 2:
+            self._prev_mode = mode
+        elif self._n >= 3:
+            if (self._prev_mode - mode) > self.drop_thresh and \
+                    (self._n - 1) - self._last_cp >= self.min_gap:
+                self._last_cp = self._n - 1
+                if self._n >= 30:
+                    self.last_cp_index = self._n - 1
+                    cp = self._n - 1
+            self._prev_mode = mode
+        return cp
+
+
 class BOCPDDetector:
     """BOCPD变点检测器（离线重算，在线触发）。"""
 
