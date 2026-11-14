@@ -7,11 +7,24 @@ Web 共享状态管理
 from collections import deque
 import json
 import logging
+import queue
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
+
+
+def _json_default(o):
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    return str(o)
 
 
 class WebState:
@@ -78,6 +91,77 @@ class WebState:
         self._trades_buffer: deque = deque(maxlen=self._max_trades)
         self._alerts_buffer: deque = deque(maxlen=self._max_alerts)
 
+        # 广播线程：latest-wins 聚合 + 节流，JSON 序列化与扇出移出交易线程
+        self._bcast_queue: queue.Queue = queue.Queue()
+        self._broadcaster = threading.Thread(
+            target=self._broadcast_loop, daemon=True, name='web-broadcast')
+        self._broadcaster.start()
+
+    # 快照型事件：同类型 latest-wins 合并；追加型事件逐条保留
+    LATEST_WINS_TYPES = frozenset(
+        {'market', 'price', 'orderbook', 'strategy', 'position', 'account', 'system'})
+    BROADCAST_INTERVAL_SEC = 0.1  # 10Hz 节流上限
+
+    def _broadcast_loop(self):
+        last_flush = 0.0
+        while True:
+            try:
+                item = self._bcast_queue.get(timeout=self.BROADCAST_INTERVAL_SEC)
+            except queue.Empty:
+                continue
+
+            pending: Dict[str, Any] = {}
+            appends: List[tuple] = []
+
+            def collect(ev):
+                ev_type, ev_data = ev
+                if ev_type in self.LATEST_WINS_TYPES:
+                    pending[ev_type] = ev_data
+                else:
+                    appends.append(ev)
+
+            collect(item)
+            while True:
+                try:
+                    collect(self._bcast_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            # 节流：距上次扇出不足间隔则补齐（聚合窗口天然合并高频更新）
+            wait = self.BROADCAST_INTERVAL_SEC - (time.monotonic() - last_flush)
+            if wait > 0:
+                time.sleep(wait)
+                while True:
+                    try:
+                        collect(self._bcast_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+            with self._subscriber_lock:
+                subscribers = list(self._subscribers)
+            if not subscribers:
+                last_flush = time.monotonic()
+                continue
+
+            messages = [
+                json.dumps({'type': t, 'data': d,
+                            'timestamp': int(time.time() * 1000)},
+                           default=_json_default)
+                for t, d in appends
+            ]
+            for t, d in pending.items():
+                messages.append(json.dumps(
+                    {'type': t, 'data': d, 'timestamp': int(time.time() * 1000)},
+                    default=_json_default))
+
+            for callback in subscribers:
+                for message in messages:
+                    try:
+                        callback(message)
+                    except Exception as e:
+                        logger.error(f"Subscriber notification error: {e}")
+            last_flush = time.monotonic()
+
     def subscribe(self, callback: Callable) -> None:
         """添加 WebSocket 订阅者"""
         with self._subscriber_lock:
@@ -91,21 +175,8 @@ class WebState:
             logger.debug(f"WebSocket subscriber removed, total: {len(self._subscribers)}")
 
     def _notify_subscribers(self, event_type: str, data: Any) -> None:
-        """通知所有订阅者"""
-        with self._subscriber_lock:
-            subscribers = list(self._subscribers)
-
-        message = json.dumps({
-            'type': event_type,
-            'data': data,
-            'timestamp': int(time.time() * 1000),
-        })
-
-        for callback in subscribers:
-            try:
-                callback(message)
-            except Exception as e:
-                logger.error(f"Subscriber notification error: {e}")
+        """投递到广播队列（非阻塞，零序列化开销，交易线程立即返回）"""
+        self._bcast_queue.put((event_type, data))
 
     # ==================== 市场数据更新 ====================
 
@@ -127,12 +198,6 @@ class WebState:
         with self._lock:
             self._data['market']['orderbook'] = orderbook
         self._notify_subscribers('orderbook', orderbook)
-
-    def update_kline(self, timeframe: str, kline: List) -> None:
-        """更新K线数据"""
-        key = f'kline_{timeframe}'
-        with self._lock:
-            self._data['market'][key] = kline
 
     # ==================== 策略状态更新 ====================
 
