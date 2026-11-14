@@ -181,6 +181,9 @@ export const useMarketStore = create<MarketStore>((set) => ({
       case 'market':
         store.updateMarket(data);
         break;
+      case 'orderbook':
+        store.updateMarket({ orderbook: data });
+        break;
       case 'price':
         store.updatePrice(data.price);
         break;

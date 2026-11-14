@@ -110,10 +110,11 @@ class WebState:
     # ==================== 市场数据更新 ====================
 
     def update_market(self, **kwargs) -> None:
-        """更新市场数据"""
+        """更新市场数据；推送仅包含本次变更字段，不重复携带全量快照。"""
         with self._lock:
             self._data['market'].update(kwargs)
-        self._notify_subscribers('market', self._data['market'])
+            payload = dict(kwargs)
+        self._notify_subscribers('market', payload)
 
     def update_price(self, price: float) -> None:
         """更新当前价格"""
@@ -122,10 +123,10 @@ class WebState:
         self._notify_subscribers('price', {'price': price})
 
     def update_orderbook(self, orderbook: Dict) -> None:
-        """更新订单簿"""
+        """更新订单簿（独立瘦身事件，不再携带全量 K 线）"""
         with self._lock:
             self._data['market']['orderbook'] = orderbook
-        self._notify_subscribers('market', self._data['market'])
+        self._notify_subscribers('orderbook', orderbook)
 
     def update_kline(self, timeframe: str, kline: List) -> None:
         """更新K线数据"""

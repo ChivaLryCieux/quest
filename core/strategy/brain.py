@@ -122,14 +122,19 @@ class StrategyBrain(BaseStrategy):
         Returns:
             feature_data: 包含技术指标的字典
         """
-        feature_data = self.cached_analysis_data
-        if not feature_data:
+        base = self.cached_analysis_data
+        if not base:
             return None
 
+        # 防御性拷贝：不原地改写快照，避免 analyze(None) 把缓存的
+        # obi/spread_pct 覆写为 0（持仓管理调用方只读最新快照）
+        feature_data = dict(base)
         feature_data['orderbook'] = orderbook
-        obi, spread_pct = self.signal_engine.ob_analyzer.analyze(orderbook)
-        feature_data['obi'] = obi
-        feature_data['spread_pct'] = spread_pct
+        if orderbook is not None:
+            obi, spread_pct = self.signal_engine.ob_analyzer.analyze(orderbook)
+            feature_data['obi'] = obi
+            feature_data['spread_pct'] = spread_pct
+        self.cached_analysis_data = feature_data
 
         # 根据ADX和VWAP判断市场状态
         adx = feature_data.get('adx', 0)

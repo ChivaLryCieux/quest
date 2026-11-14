@@ -92,7 +92,11 @@ class TradeExecutor:
         self._apply_breakeven(pos)
         self._apply_trailing_stop(pos)
 
-        analysis = self.brain.analyze()
+        # 复用最近一次 analyze() 产出的快照；每 tick 调用 brain.analyze()
+        # 会重复跑 HMM predict/retrain 并用 analyze(None) 覆写 obi/spread
+        analysis = getattr(self.brain, "cached_analysis_data", None)
+        if analysis is None and hasattr(self.brain, "analyze"):
+            analysis = self.brain.analyze()
         atr = analysis.get('atr', 0.0) if analysis else 0.0
 
         reversal_factor = analysis.get('reversal_factor', 0.0) if analysis else 0.0
