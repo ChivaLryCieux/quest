@@ -5,16 +5,27 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
+from core.analysis.tick_agg import TickAggregator
+
 logger = logging.getLogger(__name__)
 
 
 class DomesticDataStreamer(threading.Thread):
-    def __init__(self, symbol):
+    def __init__(self, symbol, data_event: threading.Event | None = None):
         super().__init__()
         self.daemon = True
         self.symbol = symbol.lower()
         self.lock = threading.Lock()
         self.running = True
+        self.data_event = data_event
+        # tick -> 真实 OHLCV 蜡烛聚合（替代 OHLC 全填同价的假蜡烛）
+        self._aggs = {
+            'kline_5m': TickAggregator(300),
+            'kline_15m': TickAggregator(900),
+            'kline_1h': TickAggregator(3600),
+        }
+        self._finals = {}
+        self._prev_day_vol = None
         self.data = {
             'kline_5m': None,
             'kline_15m': None,
@@ -26,8 +37,15 @@ class DomesticDataStreamer(threading.Thread):
         }
 
     def set_symbol(self, new_symbol):
-        """标的切换：更新订阅代码，下一轮轮询即生效。"""
+        """标的切换：更新订阅代码，重置蜡烛聚合状态。"""
         self.symbol = new_symbol.lower()
+        with self.lock:
+            self._aggs = {
+                'kline_5m': TickAggregator(300),
+                'kline_15m': TickAggregator(900),
+                'kline_1h': TickAggregator(3600),
+            }
+            self._prev_day_vol = None
         logger.info(f"[Domestic] Switching feed to {self.symbol}")
 
     def run(self):
@@ -85,24 +103,26 @@ class DomesticDataStreamer(threading.Thread):
                                     "asks": asks
                                 }
 
-                                def get_kline_candle(tf_sec):
-                                    candle_ts_ms = (timestamp_ms // (tf_sec * 1000)) * (tf_sec * 1000)
-                                    return [
-                                        candle_ts_ms,
-                                        open_price,
-                                        high_price,
-                                        low_price,
-                                        curr_price,
-                                        volume,
-                                        volume * 0.5
-                                    ]
+                                # 日累计成交量 -> tick 增量，再聚合成真实 OHLCV 蜡烛
+                                prev_vol = self._prev_day_vol
+                                self._prev_day_vol = volume
+                                if prev_vol is None:
+                                    tick_vol = 0.0
+                                elif volume < prev_vol:
+                                    tick_vol = volume  # 新交易日累计量重置
+                                else:
+                                    tick_vol = volume - prev_vol
 
                                 with self.lock:
                                     self.data['orderbook'] = orderbook
-                                    self.data['kline_5m'] = get_kline_candle(300)
-                                    self.data['kline_15m'] = get_kline_candle(900)
-                                    self.data['kline_1h'] = get_kline_candle(3600)
+                                    for key, agg in self._aggs.items():
+                                        self.data[key] = agg.update(timestamp_ms, curr_price, tick_vol)
+                                        closed = agg.pop_closed()
+                                        if closed is not None:
+                                            self._finals[key] = closed
                                     self.data['is_ready'] = True
+                                if self.data_event is not None:
+                                    self.data_event.set()
             except Exception as e:
                 logger.error(f"Domestic polling error: {e}")
             time.sleep(2.0)
@@ -113,3 +133,10 @@ class DomesticDataStreamer(threading.Thread):
     def get_latest(self):
         with self.lock:
             return self.data.copy()
+
+    def pop_finals(self):
+        """取走自上次以来聚合出的收盘K线 {kline_tf: row}。"""
+        with self.lock:
+            finals = self._finals
+            self._finals = {}
+        return finals

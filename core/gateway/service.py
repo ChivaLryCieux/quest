@@ -12,6 +12,7 @@ from core.config.settings import Config
 from core.errors import OrderError
 from .binance_stream import MarketDataStreamer
 from .domestic_feed import DomesticDataStreamer
+from core.analysis.tick_agg import TickAggregator
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +25,14 @@ class ExchangeService:
         self.is_domestic = self.symbol.lower().startswith(('sh', 'sz'))
         self.is_rest_only = Config.BINANCE_REST_ONLY
         self.api_lock = threading.Lock()
+        # 数据到达事件：事件驱动主循环用 wait_for_data 阻塞
+        self.data_event = threading.Event()
+        self._hist_client = None
 
         if self.is_domestic:
             logger.info(f"Initialized domestic ExchangeService for A-shares: {self.symbol}")
             self.client = None
-            self.ws_streamer = DomesticDataStreamer(self.symbol)
+            self.ws_streamer = DomesticDataStreamer(self.symbol, data_event=self.data_event)
             return
 
         # 增加 timeout 防止网络卡死
@@ -64,10 +68,15 @@ class ExchangeService:
                 'btc_price': 0.0,
                 'is_ready': False
             }
+            # tick -> 真实 OHLCV 蜡烛聚合（替代 OHLC 全填同价的假蜡烛）
+            self._rest_aggs = self._new_rest_aggs()
+            self._rest_finals = {}
+            self._rest_lock = threading.Lock()
+            self._prev_rest_vol = None
             # 开启后台轮询线程
             self.polling_thread = threading.Thread(target=self._poll_rest_data, daemon=True)
         else:
-            self.ws_streamer = MarketDataStreamer()
+            self.ws_streamer = MarketDataStreamer(data_event=self.data_event)
 
     def connect(self):
         if self.is_domestic:
@@ -173,7 +182,11 @@ class ExchangeService:
 
         streamer = self.ws_streamer
         if streamer is None:
-            # REST-only：轮询线程每轮重读 self.symbol，无需重建
+            # REST-only：轮询线程每轮重读 self.symbol；重置蜡烛聚合状态
+            with self._rest_lock:
+                self._rest_aggs = self._new_rest_aggs()
+                self._rest_finals = {}
+                self._prev_rest_vol = None
             logger.info(f"[Symbol] REST feed switched {old_symbol} -> {symbol}")
             return
 
@@ -234,9 +247,14 @@ class ExchangeService:
         if self.is_live:
             conf.update({'apiKey': Config.API_KEY, 'secret': Config.API_SECRET})
 
-        temp_client = ccxt.binance(conf)
-        if Config.BINANCE_REST_URL:
-            temp_client.urls['api']['fapi'] = Config.BINANCE_REST_URL
+        # 复用预热专用客户端：markets 缓存跨换标复用，省掉每次数百 ms 的 load_markets
+        if self._hist_client is None:
+            temp_client = ccxt.binance(conf)
+            if Config.BINANCE_REST_URL:
+                temp_client.urls['api']['fapi'] = Config.BINANCE_REST_URL
+            self._hist_client = temp_client
+        else:
+            temp_client = self._hist_client
 
         def fetch_one(tf, lim):
             try:
@@ -257,17 +275,9 @@ class ExchangeService:
                 ohlcv_1h = f_1h.result()
                 ohlcv_1d = f_1d.result()
 
-            try:
-                temp_client.close()
-            except Exception:
-                pass
             return {'5m': ohlcv_5m, '15m': ohlcv_15m, '1h': ohlcv_1h, '1d': ohlcv_1d}
         except Exception as e:
             logger.error(f"[History Fetch Error] {e}")
-            try:
-                temp_client.close()
-            except Exception:
-                pass
             return {'5m': [], '15m': [], '1h': [], '1d': []}
 
     def _fetch_domestic_history(self, scale, limit, symbol=None):
@@ -304,6 +314,14 @@ class ExchangeService:
             ])
         return ohlcv
 
+    @staticmethod
+    def _new_rest_aggs():
+        return {
+            'kline_5m': TickAggregator(300),
+            'kline_15m': TickAggregator(900),
+            'kline_1h': TickAggregator(3600),
+        }
+
     def _poll_rest_data(self):
         logger.info("Starting REST-only polling loop...")
         while True:
@@ -337,21 +355,6 @@ class ExchangeService:
                 curr_price = 0.0
             orderbook = None
 
-        # 3. 构造 5m, 15m, 1h 的最新单个蜡烛
-        timestamp_ms = int(time.time() * 1000)
-
-        def get_kline_candle(tf_sec):
-            candle_ts_ms = (timestamp_ms // (tf_sec * 1000)) * (tf_sec * 1000)
-            return [
-                candle_ts_ms,
-                curr_price,  # open
-                curr_price,  # high
-                curr_price,  # low
-                curr_price,  # close
-                float(ticker.get('baseVolume', 0.0) or 0.0),
-                float(ticker.get('baseVolume', 0.0) or 0.0) * 0.5
-            ]
-
         funding_rate = 0.0
         if 'info' in ticker and ticker['info']:
             try:
@@ -359,27 +362,47 @@ class ExchangeService:
             except (ValueError, TypeError):
                 pass
 
-        self._cached_latest.update({
-            'kline_5m': get_kline_candle(300),
-            'kline_15m': get_kline_candle(900),
-            'kline_1h': get_kline_candle(3600),
-            'orderbook': orderbook,
-            'funding_rate': funding_rate,
-            'btc_price': curr_price if self.symbol.startswith('BTC') else 0.0,
-            'is_ready': True
-        })
+        # 3. tick -> 真实 OHLCV 蜡烛聚合（替代 OHLC 全填同价的假蜡烛）
+        timestamp_ms = int(time.time() * 1000)
+        day_vol = float(ticker.get('baseVolume', 0.0) or 0.0)
+        prev_vol = self._prev_rest_vol
+        self._prev_rest_vol = day_vol
+        if prev_vol is None:
+            tick_vol = 0.0
+        else:
+            tick_vol = max(0.0, day_vol - prev_vol)
+
+        with self._rest_lock:
+            for key, agg in self._rest_aggs.items():
+                self._cached_latest[key] = agg.update(timestamp_ms, curr_price, tick_vol)
+                closed = agg.pop_closed()
+                if closed is not None:
+                    self._rest_finals[key] = closed
+            self._cached_latest.update({
+                'orderbook': orderbook,
+                'funding_rate': funding_rate,
+                'btc_price': curr_price if self.symbol.startswith('BTC') else 0.0,
+                'is_ready': True
+            })
+        self.data_event.set()
 
     def get_latest_data(self):
         """
         从 WebSocket 本地缓存或 REST 缓存读取数据
-        返回: (最新5m K线列表, 最新15m K线列表, 最新1h K线列表, 订单簿, 资金费率, BTC价格)
+        返回: (5m成形蜡烛, 15m成形蜡烛, 1h成形蜡烛, 订单簿, 资金费率, BTC价格, 收盘终值dict)
+        finals: {tf: kline_row} 自上次调用以来收到的收盘K线终值（x=true / 聚合收盘）
         """
         if self.is_domestic:
             data = self.ws_streamer.get_latest()
+            finals = self.ws_streamer.pop_finals()
         elif self.is_rest_only:
             data = self._cached_latest.copy()
+            with self._rest_lock:
+                finals = self._rest_finals
+                self._rest_finals = {}
         else:
             data = self.ws_streamer.get_latest()
+            finals = self.ws_streamer.pop_finals()
 
         # 使用 .get 安全获取，防止初始化时的 KeyError
         kline_5m = data.get('kline_5m')
@@ -389,7 +412,13 @@ class ExchangeService:
         funding = data.get('funding_rate', 0.0)
         btc_price = data.get('btc_price', 0.0)
 
-        return kline_5m, kline_15m, kline_1h, book, funding, btc_price
+        return kline_5m, kline_15m, kline_1h, book, funding, btc_price, finals
+
+    def wait_for_data(self, timeout: float = 0.25) -> bool:
+        """事件驱动等待：有数据到达立即返回 True，超时返回 False。"""
+        flag = self.data_event.wait(timeout)
+        self.data_event.clear()
+        return flag
 
     def get_precision_amount(self, amount, price):
         """将数量转换为交易所规定的精度"""
@@ -472,6 +501,12 @@ class ExchangeService:
         if self.ws_streamer:
             self.ws_streamer.stop()
         try:
+            if self._hist_client is not None:
+                try:
+                    self._hist_client.close()
+                except Exception:
+                    pass
+                self._hist_client = None
             # 部分 CCXT 版本支持 close
             if self.client and hasattr(self.client, 'close'):
                 with self.api_lock:

@@ -11,10 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class MarketDataStreamer(threading.Thread):
-    def __init__(self):
+    def __init__(self, data_event: threading.Event | None = None):
         super().__init__()
         self.daemon = True
         self.ws = None
+        # 数据到达事件：唤醒事件驱动的主循环
+        self.data_event = data_event
 
         # Binance Stream 名称必须小写，强制转换防止配置错误
         self.url = self._build_url()
@@ -30,6 +32,8 @@ class MarketDataStreamer(threading.Thread):
             'btc_price': 0.0,
             'is_ready': False
         }
+        # 收盘K线终值（k.x==true），由主循环一次性取走
+        self._finals = {}
         self.running = True
         self._last_update_time = time.time()
 
@@ -128,10 +132,16 @@ class MarketDataStreamer(threading.Thread):
                     updates['btc_price'] = float(k['c'])
                 elif 'kline_5m' in stream:
                     updates['kline_5m'] = kline_data
+                    if k.get('x'):
+                        updates['final_5m'] = kline_data
                 elif 'kline_15m' in stream:
                     updates['kline_15m'] = kline_data
+                    if k.get('x'):
+                        updates['final_15m'] = kline_data
                 elif 'kline_1h' in stream:
                     updates['kline_1h'] = kline_data
+                    if k.get('x'):
+                        updates['final_1h'] = kline_data
 
             # 2. 深度数据处理
             elif 'depth20' in stream:
@@ -147,6 +157,9 @@ class MarketDataStreamer(threading.Thread):
 
             # 快速更新，减少锁占用时间
             with self.lock:
+                for key in ('final_5m', 'final_15m', 'final_1h'):
+                    if key in updates:
+                        self._finals[key[6:]] = updates.pop(key)
                 self.data.update(updates)
 
                 # 检查数据是否准备就绪
@@ -159,6 +172,9 @@ class MarketDataStreamer(threading.Thread):
                         logger.info("Market Data Ready!")
 
                 self._last_update_time = time.time()
+
+            if self.data_event is not None:
+                self.data_event.set()
 
         except Exception as e:
             logger.error(f"WS Message Parse Error: {e}")
@@ -177,3 +193,10 @@ class MarketDataStreamer(threading.Thread):
     def get_latest(self):
         with self.lock:
             return self.data.copy()
+
+    def pop_finals(self):
+        """取走自上次以来收到的收盘K线终值 {tf: kline_row}。"""
+        with self.lock:
+            finals = self._finals
+            self._finals = {}
+        return finals

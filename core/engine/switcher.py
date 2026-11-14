@@ -80,16 +80,11 @@ class WarmupCoordinator:
         """将预热完成的 K 线推入 Web 共享状态。"""
         if not Config.WEB_ENABLED or not web_state:
             return
-        history_list = brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_15m = brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_1h = brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        history_1d = brain.history_1d[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-
         web_state.update_market(
-            kline_5m=history_list,
-            kline_15m=history_15m,
-            kline_1h=history_1h,
-            kline_1d=history_1d,
+            kline_5m=brain.kline_list('5m'),
+            kline_15m=brain.kline_list('15m'),
+            kline_1h=brain.kline_list('1h'),
+            kline_1d=brain.kline_list('1d'),
         )
 
 
@@ -216,7 +211,6 @@ class SymbolSwitcher:
                 bot.trader.brain = new_brain
                 bot.last_tick_analysis = analysis
                 bot.last_tick_price = 0.0
-                bot.last_btc_price = 0.0
                 if last_ts:
                     bot.current_candle_timestamp = last_ts
 

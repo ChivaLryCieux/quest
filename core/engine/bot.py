@@ -82,7 +82,6 @@ class QuantBot:
         self.current_candle_timestamp = 0
         self.last_tick_analysis = None
         self.last_tick_price = 0.0
-        self.last_btc_price = 0.0
         self.exchange_connected = False
         self.bot_lock = threading.Lock()
         # 防止 WebUI 连点导致并发切换
@@ -263,13 +262,13 @@ class QuantBot:
                 time.sleep(1)
 
     def _run_main_loop(self):
-        """正常交易主循环"""
+        """正常交易主循环（事件驱动：数据到达即唤醒，超时兜底做维护）"""
         while True:
             try:
                 self._check_user_input()
+                self.exchange.wait_for_data(self.LOOP_SLEEP_SECONDS * 5)
                 self._tick()
                 self._persist_runtime_state()  # 内部按 STATE_SAVE_INTERVAL_SEC 节流
-                time.sleep(self.LOOP_SLEEP_SECONDS)
             except KeyboardInterrupt:
                 self._exit_procedure()
             except Exception as exc:
@@ -344,7 +343,7 @@ class QuantBot:
 
     def _tick(self):
         with self.bot_lock:
-            c_5m, c_15m, c_1h, book, fr, btc_price = self.exchange.get_latest_data()
+            c_5m, c_15m, c_1h, book, fr, btc_price, finals = self.exchange.get_latest_data()
             if not c_5m:
                 return
 
@@ -356,42 +355,37 @@ class QuantBot:
             curr_price = float(c_5m[4])
             self.last_tick_price = curr_price
 
-            btc_chg = self._calculate_btc_change(btc_price)
+            # 1. 收盘终值先行（WS x=true / TickAggregator 弹出），保证指标吃到真终值
+            closed_5m = False
+            for tf in ('1h', '15m', '5m'):
+                row = finals.get(f'kline_{tf}') or finals.get(tf)
+                if row and self.brain.commit_final(row, tf):
+                    closed_5m = (tf == '5m') or closed_5m
 
+            # 2. 成形中蜡烛更新；时间戳前进时自动收盘上一根
+            if c_15m:
+                self.brain.push_forming(c_15m, '15m')
+            if c_1h:
+                self.brain.push_forming(c_1h, '1h')
+            if self.brain.push_forming(c_5m, '5m'):
+                closed_5m = True
+
+            # 3. 持仓管理（读快照，不再每 tick 跑 analyze）
             if not self.trader.position.is_flat:
                 self.trader.tick(curr_price, fr, None, timestamp)
 
             if self.current_candle_timestamp == 0:
                 self.current_candle_timestamp = timestamp
-                self._ingest_realtime_candles(c_5m, c_15m, c_1h, btc_chg)
-                if Config.WEB_ENABLED:
-                    history_list = self.brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                    history_15m = self.brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                    history_1h = self.brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                    self.web_state.update_market(
-                        kline_5m=history_list,
-                        kline_15m=history_15m,
-                        kline_1h=history_1h
-                    )
+                self._push_web_klines()
                 return
 
-            is_new_candle = timestamp > self.current_candle_timestamp
-            if not is_new_candle:
+            if not closed_5m:
                 self._update_ui(curr_price, self.last_tick_analysis)
                 return
 
             logger.info(f"[Candle Close] {self.current_candle_timestamp} -> {timestamp}")
             self.current_candle_timestamp = timestamp
-            self._ingest_realtime_candles(c_5m, c_15m, c_1h, btc_chg)
-            if Config.WEB_ENABLED:
-                history_list = self.brain.history_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                history_15m = self.brain.history_15m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                history_1h = self.brain.history_1h[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-                self.web_state.update_market(
-                    kline_5m=history_list,
-                    kline_15m=history_15m,
-                    kline_1h=history_1h
-                )
+            self._push_web_klines()
 
             analysis = self.brain.analyze(book)
             # 仅在非看盘模式下尝试开仓；持仓管理（上方）对遗留持仓仍生效
@@ -401,26 +395,19 @@ class QuantBot:
                 self.trader.tick(curr_price, fr, analysis, timestamp)
 
             self._update_ui(curr_price, analysis)
-            self.alert_manager.check_and_alert(self.brain.history_5m, analysis)
+            self.alert_manager.check_and_alert(self.brain.rings['5m'], analysis)
             self._send_heartbeat(curr_price, analysis)
             if analysis:
                 self.last_tick_analysis = analysis
 
-    def _calculate_btc_change(self, btc_price):
-        if self.last_btc_price == 0:
-            self.last_btc_price = btc_price
-            return 0.0
-
-        btc_change = (btc_price - self.last_btc_price) / self.last_btc_price if self.last_btc_price > 0 else 0.0
-        self.last_btc_price = btc_price
-        return btc_change
-
-    def _ingest_realtime_candles(self, c_5m, c_15m, c_1h, btc_chg):
-        if c_15m:
-            self.brain.ingest_candle(c_15m, '15m', btc_change_pct=btc_chg)
-        if c_1h:
-            self.brain.ingest_candle(c_1h, '1h', btc_change_pct=btc_chg)
-        self.brain.ingest_candle(c_5m, '5m', btc_change_pct=btc_chg)
+    def _push_web_klines(self):
+        if not Config.WEB_ENABLED:
+            return
+        self.web_state.update_market(
+            kline_5m=self.brain.kline_list('5m'),
+            kline_15m=self.brain.kline_list('15m'),
+            kline_1h=self.brain.kline_list('1h'),
+        )
 
     def _update_ui(self, price, analysis):
         pos = self.trader.position
@@ -491,13 +478,11 @@ class QuantBot:
             pass
 
     def _calculate_change_24h(self, price):
-        hist = self.brain.history_5m
-        if len(hist) >= 288:
-            price_24h_ago = float(hist.iloc[-288]['close'])
-            return (price - price_24h_ago) / price_24h_ago * 100
-        if len(hist) > 1:
-            price_first = float(hist.iloc[0]['close'])
-            return (price - price_first) / price_first * 100
+        closes = self.brain.rings['5m'].column('close')
+        if len(closes) >= 288:
+            return (price - closes[-288]) / closes[-288] * 100
+        if len(closes) > 1:
+            return (price - closes[0]) / closes[0] * 100
         return 0.0
 
     def _check_user_input(self):
